@@ -333,13 +333,10 @@ class MultiClockApp(tk.Tk):
 
         self._build_menu()
 
-        # --- NEW: where we last saved/loaded the session ---
-        # If you do "Save Session" with a file chooser, we remember that path.
-        # Autosave will then use that path. If never set, autosave uses DEFAULT_SESSION_PATH.
+        # Remember last save/load file path for autosave to use.
         self.current_session_path: Path | None = None
 
-        # --- NEW: autosave scheduled job id (for Tk's .after) ---
-        # We'll keep this so we can cancel/reschedule as needed.
+        # Tk "after" job handle for autosave loop.
         self._autosave_job = None
 
         self.nb = ttk.Notebook(self)
@@ -353,114 +350,74 @@ class MultiClockApp(tk.Tk):
         # start with one tab
         self.add_danger_clock()
 
-        # --- NEW: save-on-exit hook ---
-        # When the window is closed, we will attempt to save once more.
+        # Save-on-exit hook: IMPORTANT — this needs a *callable*, not a string.
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        # --- NEW: start the autosave loop ---
-        # This will silently save your session every AUTOSAVE_MS milliseconds.
+        # Start the autosave loop.
         self._start_autosave()
 
-        # ---------- Autosave & Exit ----------
+    # ---------- Autosave & Exit ----------
 
-        def _collect_tabs(self) -> list[dict]:
-            """
-            Gather the data for all open tabs (clocks) by calling their to_dict().
-            This is what we write to disk when we save.
-            """
-            items = []
-            for tab_id in self.nb.tabs():
-                frame = self._frame_from_tab(tab_id)
-                if hasattr(frame, "to_dict"):
-                    items.append(frame.to_dict())
-            return items
+    def _collect_tabs(self) -> list[dict]:
+        """Gather JSON-serializable dicts from each tab via to_dict()."""
+        items = []
+        for tab_id in self.nb.tabs():
+            frame = self._frame_from_tab(tab_id)
+            if hasattr(frame, "to_dict"):
+                items.append(frame.to_dict())
+        return items
 
-        def _save_to_path(self, path: Path):
-            """
-            Write the current session (all tabs) to the given JSON file.
-            Raises an exception if something goes wrong so callers can decide
-            whether to show a message or fail silently.
-            """
-            items = self._collect_tabs()
-            if not items:
-                # Nothing to save is not an "error" for autosave.
-                return
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump({"items": items}, f, ensure_ascii=False, indent=2)
+    def _save_to_path(self, path: Path):
+        """Save current session to JSON at `path`."""
+        items = self._collect_tabs()
+        if not items:
+            return  # nothing to save is fine (esp. for autosave)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"items": items}, f, ensure_ascii=False, indent=2)
 
-        def _start_autosave(self):
-            """
-            Begin the autosave loop. Each run reschedules itself for AUTOSAVE_MS later.
-            """
+    def _start_autosave(self):
+        """Kick off autosave loop."""
+        self._schedule_next_autosave()
+
+    def _schedule_next_autosave(self):
+        """(Re)schedule next autosave tick."""
+        if self._autosave_job:
+            try:
+                self.after_cancel(self._autosave_job)
+            except Exception:
+                pass
+            self._autosave_job = None
+        self._autosave_job = self.after(AUTOSAVE_MS, self._autosave_tick)
+
+    def _autosave_tick(self):
+        """Do one autosave, then reschedule."""
+        try:
+            target = self.current_session_path or DEFAULT_SESSION_PATH
+            self._save_to_path(Path(target))
+        except Exception:
+            # silent on autosave errors
+            pass
+        finally:
             self._schedule_next_autosave()
 
-        def _schedule_next_autosave(self):
-            """
-            Cancel any existing scheduled autosave and schedule a new one.
-            """
+    def _on_close(self):
+        """Final best-effort save, stop autosave, then close app."""
+        try:
+            target = self.current_session_path or DEFAULT_SESSION_PATH
+            self._save_to_path(Path(target))
+        except Exception:
+            pass
+        finally:
             if self._autosave_job:
                 try:
                     self.after_cancel(self._autosave_job)
                 except Exception:
                     pass
                 self._autosave_job = None
-            self._autosave_job = self.after(AUTOSAVE_MS, self._autosave_tick)
+            self.destroy()
 
-        def _autosave_tick(self):
-            """
-            Perform one autosave to the chosen path (or DEFAULT_SESSION_PATH),
-            then reschedule the next tick.
-            """
-            try:
-                target = self.current_session_path or DEFAULT_SESSION_PATH
-                self._save_to_path(Path(target))
-            except Exception:
-                # Silent failure on autosave; will try again next cycle.
-                pass
-            finally:
-                self._schedule_next_autosave()
-
-        def _on_close(self):
-            """
-            Final best‑effort save, stop autosave, then destroy the window.
-            """
-            try:
-                target = self.current_session_path or DEFAULT_SESSION_PATH
-                self._save_to_path(Path(target))
-            except Exception:
-                pass
-            finally:
-                if self._autosave_job:
-                    try:
-                        self.after_cancel(self._autosave_job)
-                    except Exception:
-                        pass
-                    self._autosave_job = None
-                self.destroy()
-
-        def _on_close(self):
-            """
-            Called when the app is closing (window close button).
-            We do a final best-effort save to DEFAULT_SESSION_PATH,
-            cancel the autosave job, and then destroy the window.
-            """
-            try:
-                # Save to the most recent explicit path if set; otherwise, default.
-                target = self.current_session_path or DEFAULT_SESSION_PATH
-                self._save_to_path(Path(target))
-            except Exception:
-                # Ignore errors on close — user is exiting anyway.
-                pass
-            finally:
-                # Stop future autosave ticks.
-                if self._autosave_job:
-                    try:
-                        self.after_cancel(self._autosave_job)
-                    except Exception:
-                        pass
-                    self._autosave_job = None
-                self.destroy()
+    # ---------- Menu ----------
 
     def _build_menu(self):
         menubar = tk.Menu(self)
@@ -472,7 +429,8 @@ class MultiClockApp(tk.Tk):
         menubar.add_cascade(label="File", menu=filemenu)
         self.config(menu=menubar)
 
-    # tabs
+    # ---------- Tabs ----------
+
     def add_danger_clock(self, title=None, segments=4, filled=0, inverted=False, fill_color=None, notes=""):
         # auto-number default titles
         if title is None or not title.strip() or title.strip().startswith("Danger Clock"):
@@ -496,14 +454,13 @@ class MultiClockApp(tk.Tk):
         if self.nb.index("end") == 0:
             return
         current = self.nb.select()
-        if current: self.nb.forget(current)
+        if current:
+            self.nb.forget(current)
 
-    # save/load
+    # ---------- Save / Load ----------
+
     def save_session(self):
-        """
-        Manual Save: asks the user for a file path and writes the current session there.
-        Also records the chosen file so future autosaves use the same path.
-        """
+        """Manual save with file chooser; remembers path for autosave."""
         items = self._collect_tabs()
         if not items:
             messagebox.showinfo("Nothing to save", "There are no tabs.")
@@ -515,17 +472,13 @@ class MultiClockApp(tk.Tk):
             return
         try:
             self._save_to_path(Path(path))
-            # Remember this file for future autosaves
-            self.current_session_path = Path(path)
+            self.current_session_path = Path(path)  # remember for autosave
             messagebox.showinfo("Saved", f"Saved to:\n{path}")
         except Exception as e:
             messagebox.showerror("Save failed", f"{e}")
 
     def load_session(self):
-        """
-        Manual Load: asks for a JSON file and replaces all tabs with its contents.
-        Also records the chosen file so future autosaves use the same path.
-        """
+        """Manual load; rebuilds tabs; remembers path for autosave."""
         path = filedialog.askopenfilename(title="Load session JSON",
                                           filetypes=[("JSON files", "*.json")])
         if not path:
@@ -551,9 +504,10 @@ class MultiClockApp(tk.Tk):
                                       fill_color=item.get("fill_color"),
                                       notes=item.get("notes", ""))
 
-        # Remember this file for future autosaves
-        self.current_session_path = Path(path)
+        self.current_session_path = Path(path)  # remember for autosave
         messagebox.showinfo("Loaded", f"Loaded from:\n{path}")
+
+    # ---------- Helpers ----------
 
     def _frame_from_tab(self, tab_id):
         return self.nametowidget(tab_id)
@@ -562,6 +516,7 @@ class MultiClockApp(tk.Tk):
     def _short_title(title: str) -> str:
         title = (title or "Clock").strip()
         return (title[:18] + "…") if len(title) > 18 else title
+
 
 if __name__ == "__main__":
     app = MultiClockApp()
