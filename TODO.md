@@ -5,23 +5,34 @@ This file is for jotting down ideas, bugs, and enhancements before they are read
 ---
 
 ## 🐞 Bugs
-- [ ] 
+- [ ] Danger Clock - Invert colors - shows black on black.
 - [ ] 
 
 ---
 
 ## ✨ Features & Enhancements
-- [ ] Add "Race Clock" type (multiple teams in tug-of-war style)
-- [ ] Set All button: apply one time setting across all segments
-- [ ] Smarter defaults for Mission Clock (start at 00:00)
+### Main App
+- [ ] Open the app in the same spot it was last closed
+- [ ] In File Menu, add Add Danger Clock
+- [ ] Auto-Save every 5 minutes silently
+- [ ] Keyboard shortcuts
+
+### Danger Clocks
+- [ ] Add Save PNG button, save with current date and time
+- [ ] 
+- [ ] 
 - [ ] 
 
 ---
 
 ## 💡 Future Ideas
+- [ ] Tug-of-War Clock
 - [ ] Save/load clock setups from a file
 - [ ] Share/export clocks with others
 - [ ] Add sound effects when a clock segment completes
+- [ ] Add "Race Clock" type (multiple teams in tug-of-war style)
+- [ ] Set All button: apply one time setting across all segments
+- [ ] Smarter defaults for Mission Clock (start at 00:00)
 
 
 ## Workflow
