@@ -140,7 +140,7 @@ class ClockBase(ttk.Frame):
         ent.grid(row=0, column=1, columnspan=3, sticky="we", padx=6, pady=(8,0))
         ent.bind("<KeyRelease>", lambda e: self.draw())
 
-        inv = ttk.Checkbutton(self, text="Invert colors", variable=self.inverted, command=self.draw)
+        inv = ttk.Checkbutton(self, text="Dark Mode", variable=self.inverted, command=self._on_theme_changed)
         inv.grid(row=0, column=4, padx=(6, 10), pady=(8,0), sticky="w")
 
         ttk.Button(self, text="Notes", command=self.open_notes).grid(row=0, column=5, padx=6, pady=(8,0))
@@ -148,6 +148,10 @@ class ClockBase(ttk.Frame):
         self.canvas = tk.Canvas(self, bg="white", highlightthickness=0)
         self.canvas.grid(row=1, column=0, columnspan=8, sticky="nsew", padx=8, pady=8)
         self.canvas.bind("<Configure>", lambda e: self.draw())
+
+    def _on_theme_changed(self):
+        """Hook for subclasses when theme flips; default just redraws."""
+        self.draw()
 
     def _colors(self):
         return {"bg":"black","fg":"white"} if self.inverted.get() else {"bg":"white","fg":"black"}
@@ -260,6 +264,35 @@ class DangerClockFrame(ClockBase):
         # border + dot
         c.create_oval(x0, y0, x1, y1, width=LINE_W, outline=colors["fg"])
         c.create_oval(cx-3, cy-3, cx+3, cy+3, fill=colors["fg"], outline=colors["fg"])
+
+    def _on_theme_changed(self):
+        """
+        When toggling Dark Mode:
+        - If fill is still the default (black), switch to white for visibility.
+        - When switching back to Light Mode:
+          If fill is white (the dark-mode default), switch back to black.
+        Custom colors are left untouched.
+        """
+        fill = (self.fill_color or "").lower()
+
+        if self.inverted.get():
+            # Dark Mode ON: background becomes black
+            if fill in ("#000000", "black"):
+                self.fill_color = "#FFFFFF"
+                try:
+                    self.fill_preview.configure(bg=self.fill_color)
+                except Exception:
+                    pass
+        else:
+            # Dark Mode OFF: background becomes white
+            if fill in ("#ffffff", "white"):
+                self.fill_color = "#000000"
+                try:
+                    self.fill_preview.configure(bg=self.fill_color)
+                except Exception:
+                    pass
+
+        self.draw()
 
     # serialization
     def to_dict(self):

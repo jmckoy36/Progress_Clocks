@@ -19,7 +19,7 @@ This file is for jotting down ideas, bugs, and enhancements before they are read
 
 ### Danger Clocks
 - [ ] Add Save PNG button, save with current date and time
-- [ ] 
+- [ ] Left/Right Mouse Clicks on the segment fills or removes fill
 - [ ] 
 - [ ] 
 
