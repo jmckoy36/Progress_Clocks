@@ -14,7 +14,6 @@ This file is for jotting down ideas, bugs, and enhancements before they are read
 ### Main App
 - [ ] Open the app in the same spot it was last closed
 - [ ] In File Menu, add Add Danger Clock
-- [ ] Auto-Save every 5 minutes silently
 - [ ] Keyboard shortcuts
 
 ### Danger Clocks
