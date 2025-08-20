@@ -5,7 +5,7 @@ This file is for jotting down ideas, bugs, and enhancements before they are read
 ---
 
 ## 🐞 Bugs
-- [ ] 
+- [ ] Test
 - [ ] 
 
 ---
