@@ -10,12 +10,13 @@ import os
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, colorchooser
+import tkinter.font as tkfont
 
 # ---------------------------
 # Config / constants
 # ---------------------------
 PADDING = 16
-TITLE_SPACE = 44
+TITLE_SPACE = 56
 LINE_W = 3
 SEGMENT_CHOICES = (4, 6, 8, 12)
 AUTOSAVE_MS = 5 * 60 * 1000  # 5 minutes
@@ -246,6 +247,19 @@ class DangerClockFrame(ClockBase):
         # Pass shared_inverted_var up to base so it can hide its local Dark Mode checkbox when shared
         super().__init__(master, initial_title=initial_title, inverted=inverted, notes=notes,
                          shared_inverted_var=shared_inverted_var)
+        # --- Title controls (per-clock editable name) ---
+        ttk.Label(self, text="Clock Name:").grid(row=0, column=0, padx=6, pady=(8, 0), sticky="w")
+        title_entry = ttk.Entry(self, textvariable=self.title_var, width=20, justify="left")
+        title_entry.grid(row=0, column=1, padx=(0, 12), pady=(8, 0), sticky="w")
+        # Redraw the canvas whenever the title changes
+        self.title_var.trace_add("write", lambda *_: self.draw())
+        # OPTIONAL: live-update on each keystroke as well
+        title_entry.bind("<KeyRelease>", lambda e: self.draw())
+
+        # --- Title controls (per-clock editable name) ---
+        ttk.Label(self, text="Clock Name:").grid(row=0, column=0, padx=6, pady=(8, 0), sticky="w")
+        title_entry = ttk.Entry(self, textvariable=self.title_var, width=20, justify="left")
+        title_entry.grid(row=0, column=1, padx=(0, 12), pady=(8, 0), sticky="w")
 
         # --- Segments: allow a shared IntVar (used by Racing container later) ---
         self._uses_shared_segments = shared_segments_var is not None
@@ -456,7 +470,30 @@ class DangerClockFrame(ClockBase):
         c.configure(bg=colors["bg"])
         w = max(1, c.winfo_width()); h = max(1, c.winfo_height())
 
-        c.create_text(w/2, 16, text=self.title_var.get(), font=("Arial", 16, "bold"), fill=colors["fg"])
+        # ----- Title (auto-fit to width, wrap if still too long) -----
+        title_text = self.title_var.get()
+        avail_w = max(1, w - 2 * PADDING)
+
+        size = 16
+        try:
+            f = tkfont.Font(family="Arial", size=size, weight="bold")
+            while f.measure(title_text) > avail_w and size > 9:
+                size -= 1
+                f.configure(size=size)
+        except Exception:
+            f = ("Arial", 12, "bold")
+
+        extra = {}
+        try:
+            # If even the smallest font is still too wide, allow wrapping
+            if isinstance(f, tkfont.Font) and f.measure(title_text) > avail_w:
+                extra["width"] = avail_w
+                extra["justify"] = "center"
+        except Exception:
+            pass
+
+        # Draw from the very top (anchor north) so it doesn’t overlap the circle
+        c.create_text(w / 2, 8, text=title_text, font=f, fill=colors["fg"], anchor="n", **extra)
 
         usable_h = max(1, h - TITLE_SPACE)
         r = max(1, min((w - 2*PADDING), (usable_h - 2*PADDING)) / 2)
