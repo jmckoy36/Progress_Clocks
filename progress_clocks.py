@@ -18,10 +18,7 @@ PADDING = 16
 TITLE_SPACE = 44
 LINE_W = 3
 SEGMENT_CHOICES = (4, 6, 8, 12)
-# How often to auto-save the whole session (in milliseconds).
-# 5 minutes = 5 * 60 * 1000
-AUTOSAVE_MS = 5 * 60 * 1000
-
+AUTOSAVE_MS = 5 * 60 * 1000  # 5 minutes
 
 def get_app_dir() -> Path:
     if os.name == "nt":
@@ -32,7 +29,9 @@ def get_app_dir() -> Path:
 
 APP_DIR = get_app_dir()
 APP_DIR.mkdir(parents=True, exist_ok=True)
+
 DEFAULT_SESSION_PATH = APP_DIR / "session.json"
+SETTINGS_PATH = APP_DIR / "settings.json"
 
 # ---------------------------
 # Utilities (shared)
@@ -65,6 +64,31 @@ def _next_numbered_title(existing_titles, base):
     while n in used:
         n += 1
     return f"{base} {n}"
+
+def load_settings() -> dict:
+    """Read app settings from disk. Returns a dict with defaults if missing."""
+    try:
+        if SETTINGS_PATH.exists():
+            with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+    except Exception:
+        pass
+    # defaults
+    return {
+        "open_last_on_launch": False,    # user toggle
+        "last_session_path": None,       # updated after a successful save/load
+    }
+
+def save_settings(data: dict) -> None:
+    """Persist app settings to disk."""
+    try:
+        SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
 
 # ---------------------------
 # Modal Notes (shared)
@@ -400,23 +424,42 @@ class DangerClockFrame(ClockBase):
             "type": self.TYPE,
             "title": self.title_var.get(),
             "segments": int(self.segments.get()),
-            "filled": int(sum(self.filled)),          # save count of filled segments
+            "filled": int(sum(self.filled)),  # keep for backward compatibility
+            "filled_list": list(bool(v) for v in self.filled),  # NEW: exact pattern
             "inverted": bool(self.inverted.get()),
             "fill_color": self.fill_color,
             "notes": self.notes,
         }
 
     def from_dict(self, data: dict):
+        # basic fields
         self.title_var.set(data.get("title", "Danger Clock"))
         self.segments.set(int(data.get("segments", 4)))
-        count = int(data.get("filled", 0))
-        self._resize_filled_to(int(self.segments.get()))
-        self._set_fill_count(count)
         self.inverted.set(bool(data.get("inverted", False)))
         self.fill_color = data.get("fill_color", self.fill_color)
         self.notes = data.get("notes", "")
-        try: self.fill_preview.configure(bg=self.fill_color)
-        except Exception: pass
+
+        # ensure list length matches segments
+        segs = int(self.segments.get())
+        self._resize_filled_to(segs)
+
+        # NEW: prefer exact pattern if provided
+        flist = data.get("filled_list")
+        if isinstance(flist, list) and len(flist) > 0:
+            # coerce every entry to bool, then resize/truncate to segment count
+            pattern = [bool(v) for v in flist][:segs]
+            if len(pattern) < segs:
+                pattern += [False] * (segs - len(pattern))
+            self.filled = pattern
+        else:
+            # fallback for old files that only stored the count
+            count = int(data.get("filled", 0))
+            self._set_fill_count(count)
+
+        try:
+            self.fill_preview.configure(bg=self.fill_color)
+        except Exception:
+            pass
         self.draw()
 
     def _resize_filled_to(self, new_count: int):
@@ -448,9 +491,11 @@ class MultiClockApp(tk.Tk):
         self.geometry("900x650")
         self.minsize(700, 500)
 
-        self._build_menu()
+        # Load settings first
+        self.settings = load_settings()
 
         # Remember last save/load file path for autosave to use.
+        # (If we auto-load, we'll set this below.)
         self.current_session_path: Path | None = None
 
         # Tk "after" job handle for autosave loop.
@@ -459,15 +504,32 @@ class MultiClockApp(tk.Tk):
         self.nb = ttk.Notebook(self)
         self.nb.pack(fill="both", expand=True)
 
+        # Build menus AFTER we have self.settings
+        self._build_menu()
+
         toolbar = ttk.Frame(self)
         toolbar.pack(fill="x")
         ttk.Button(toolbar, text="Add Danger Clock", command=self.add_danger_clock).pack(side="left", padx=6, pady=6)
         ttk.Button(toolbar, text="Remove Current", command=self.remove_current).pack(side="left", padx=6, pady=6)
 
-        # start with one tab
-        self.add_danger_clock()
+        # Decide how to start
+        opened_from_settings = False
+        if self.settings.get("open_last_on_launch"):
+            last_path = self.settings.get("last_session_path")
+            if last_path:
+                try:
+                    self._load_from_path(Path(last_path))
+                    self.current_session_path = Path(last_path)  # remember for autosave
+                    opened_from_settings = True
+                except Exception:
+                    # fall back to a fresh tab
+                    opened_from_settings = False
 
-        # Save-on-exit hook: IMPORTANT — this needs a *callable*, not a string.
+        if not opened_from_settings:
+            # start with one empty tab
+            self.add_danger_clock()
+
+        # Save-on-exit hook
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         # Start the autosave loop.
@@ -512,6 +574,10 @@ class MultiClockApp(tk.Tk):
         try:
             target = self.current_session_path or DEFAULT_SESSION_PATH
             self._save_to_path(Path(target))
+            # record the autosave path as last session, too (optional)
+            self.settings["last_session_path"] = str(Path(target))
+            save_settings(self.settings)
+
         except Exception:
             # silent on autosave errors
             pass
@@ -538,13 +604,30 @@ class MultiClockApp(tk.Tk):
 
     def _build_menu(self):
         menubar = tk.Menu(self)
+
+        # File menu
         filemenu = tk.Menu(menubar, tearoff=False)
         filemenu.add_command(label="Save Session", command=self.save_session)
         filemenu.add_command(label="Load Session", command=self.load_session)
         filemenu.add_separator()
         filemenu.add_command(label="Exit", command=self.destroy)
         menubar.add_cascade(label="File", menu=filemenu)
+
+        # Settings menu
+        self.open_last_var = tk.BooleanVar(value=bool(self.settings.get("open_last_on_launch", False)))
+        settings_menu = tk.Menu(menubar, tearoff=False)
+        settings_menu.add_checkbutton(
+            label="Open last session on launch",
+            variable=self.open_last_var,
+            command=self._on_toggle_open_last
+        )
+        menubar.add_cascade(label="Settings", menu=settings_menu)
+
         self.config(menu=menubar)
+
+    def _on_toggle_open_last(self):
+        self.settings["open_last_on_launch"] = bool(self.open_last_var.get())
+        save_settings(self.settings)
 
     # ---------- Tabs ----------
 
@@ -566,6 +649,7 @@ class MultiClockApp(tk.Tk):
             self.nb.tab(idx, text=self._short_title(frame.title_var.get()))
         frame.title_var.trace_add("write", lambda *_: sync())
         self.nb.select(frame)
+        return frame
 
     def remove_current(self):
         if self.nb.index("end") == 0:
@@ -590,6 +674,9 @@ class MultiClockApp(tk.Tk):
         try:
             self._save_to_path(Path(path))
             self.current_session_path = Path(path)  # remember for autosave
+            # NEW:
+            self.settings["last_session_path"] = str(self.current_session_path)
+            save_settings(self.settings)
             messagebox.showinfo("Saved", f"Saved to:\n{path}")
         except Exception as e:
             messagebox.showerror("Save failed", f"{e}")
@@ -601,11 +688,22 @@ class MultiClockApp(tk.Tk):
         if not path:
             return
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            self._load_from_path(Path(path))
+            self.current_session_path = Path(path)  # remember for autosave
+            # NEW:
+            self.settings["last_session_path"] = str(self.current_session_path)
+            save_settings(self.settings)
+            messagebox.showinfo("Loaded", f"Loaded from:\n{path}")
         except Exception as e:
             messagebox.showerror("Load failed", f"{e}")
-            return
+
+        self.current_session_path = Path(path)  # remember for autosave
+        messagebox.showinfo("Loaded", f"Loaded from:\n{path}")
+
+    def _load_from_path(self, path: Path):
+        """Load a session JSON from a specific path (no file chooser)."""
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
 
         # Clear existing tabs
         for tab_id in self.nb.tabs():
@@ -614,15 +712,11 @@ class MultiClockApp(tk.Tk):
         # Rebuild from saved items
         for item in data.get("items", []):
             if item.get("type") == DangerClockFrame.TYPE:
-                self.add_danger_clock(title=item.get("title", "Danger Clock"),
-                                      segments=int(item.get("segments", 4)),
-                                      filled=int(item.get("filled", 0)),
-                                      inverted=bool(item.get("inverted", False)),
-                                      fill_color=item.get("fill_color"),
-                                      notes=item.get("notes", ""))
-
-        self.current_session_path = Path(path)  # remember for autosave
-        messagebox.showinfo("Loaded", f"Loaded from:\n{path}")
+                # Create a tab (title will be corrected by from_dict)
+                frame = self.add_danger_clock(title=item.get("title", "Danger Clock"))
+                # Apply full state from JSON (including filled_list)
+                if hasattr(frame, "from_dict"):
+                    frame.from_dict(item)
 
     # ---------- Helpers ----------
 
