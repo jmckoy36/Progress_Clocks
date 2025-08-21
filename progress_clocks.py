@@ -90,6 +90,33 @@ def save_settings(data: dict) -> None:
     except Exception:
         pass
 
+def center_window_over_parent(parent_widget, top, width=None, height=None):
+    """Center Toplevel `top` over the toplevel window of `parent_widget`, on whatever monitor it's on."""
+    root = parent_widget.winfo_toplevel()
+    root.update_idletasks(); top.update_idletasks()
+
+    # Parent window position/size in virtual screen coords (multi‑monitor aware)
+    rx, ry = root.winfo_rootx(), root.winfo_rooty()
+    rw, rh = root.winfo_width(), root.winfo_height()
+    if rw <= 1 or rh <= 1:
+        # fallback: parse geometry if width/height not realized yet
+        try:
+            g = root.geometry()
+            size, x, y = g.split("+", 2)
+            rw, rh = map(int, size.split("x"))
+            rx, ry = int(x), int(y)
+        except Exception:
+            pass
+
+    # Desired size: requested size unless explicitly given
+    tw = width  or max(top.winfo_reqwidth(),  320)
+    th = height or max(top.winfo_reqheight(), 200)
+
+    px = rx + max(0, (rw - tw)//2)
+    py = ry + max(0, (rh - th)//2)
+    top.geometry(f"{tw}x{th}+{px}+{py}")
+
+
 # ---------------------------
 # Modal Notes (shared)
 # ---------------------------
@@ -368,7 +395,12 @@ class DangerClockFrame(ClockBase):
         return idx
 
     def choose_fill_color(self):
-        (rgb, hexv) = colorchooser.askcolor(color=self.fill_color, title="Choose fill color")
+        (rgb, hexv) = colorchooser.askcolor(
+            color=self.fill_color,
+            title="Choose fill color",
+            parent=self.winfo_toplevel()  # NEW
+        )
+
         if hexv:
             self.fill_color = hexv
             try: self.fill_preview.configure(bg=hexv)
@@ -632,6 +664,8 @@ class DangerClockFrame(ClockBase):
         top.title("Edit Segment Labels")
         top.transient(self.winfo_toplevel())
         top.grab_set()
+        # NEW: center it over the app window
+        center_window_over_parent(self, top)
 
         frm = ttk.Frame(top, padding=8)
         frm.pack(fill="both", expand=True)
@@ -673,6 +707,8 @@ class DangerClockFrame(ClockBase):
         top = tk.Toplevel(self)
         top.title(f"Label for Segment {idx}")
         top.transient(self.winfo_toplevel()); top.grab_set()
+        # NEW:
+        center_window_over_parent(self, top)
         frm = ttk.Frame(top, padding=8); frm.pack(fill="both", expand=True)
         ent = ttk.Entry(frm, width=36)
         ent.pack(fill="x"); ent.insert(0, self.labels[idx] or "")
@@ -1087,11 +1123,14 @@ class MultiClockApp(tk.Tk):
         """Manual save with file chooser; remembers path for autosave."""
         items = self._collect_tabs()
         if not items:
-            messagebox.showinfo("Nothing to save", "There are no tabs.")
+            messagebox.showinfo("Nothing to save", "There are no tabs.", parent=self)
             return
-        path = filedialog.asksaveasfilename(title="Save session as JSON",
-                                            defaultextension=".json",
-                                            filetypes=[("JSON files", "*.json")])
+        path = filedialog.asksaveasfilename(
+            title="Save session as JSON",
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json")],
+            parent=self,
+        )
         if not path:
             return
         try:
@@ -1100,9 +1139,9 @@ class MultiClockApp(tk.Tk):
             # NEW:
             self.settings["last_session_path"] = str(self.current_session_path)
             save_settings(self.settings)
-            messagebox.showinfo("Saved", f"Saved to:\n{path}")
+            messagebox.showinfo("Saved", f"Saved to:\n{path}", parent=self)
         except Exception as e:
-            messagebox.showerror("Save failed", f"{e}")
+            messagebox.showerror("Save failed", f"{e}", parent=self)
 
     def load_session(self):
         """Manual load; rebuilds tabs; remembers path for autosave."""

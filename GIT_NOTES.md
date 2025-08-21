@@ -243,7 +243,66 @@ session*.json
 
 ---
 
+You said:
+Yes, make it something I can add to my GIT_NOTES.md for future reference.
+ChatGPT said:
 
+Got it 👍 — here’s a clean, ready-to-drop section for your GIT_NOTES.md that covers switching between branches and keeping both main and feature branches updated across PCs.
+
+## Working with Multiple Branches (main + feature branches)
+
+### Switch Branches
+- Switch to `main`:
+  ```bash
+  git switch main
+
+
+Switch to a feature branch (example: feature/racing-clocks):
+
+git switch feature/racing-clocks
+
+Create Local Tracking Branch for a Remote Feature Branch
+
+If the branch exists on GitHub but not locally:
+
+git switch -c feature/racing-clocks --track origin/feature/racing-clocks
+
+Keep Branches Updated
+
+Always fetch updates from GitHub:
+
+git fetch --all --prune
+
+
+Fast-forward your branch to match GitHub:
+
+git pull --ff-only
+
+Verify Status
+
+Check which branch you are on and sync status:
+
+git status
+
+
+See last few commits:
+
+git log --oneline -5
+
+Notes
+
+main should always be stable and in sync with GitHub.
+
+Do new development or experiments on feature branches.
+
+Once work is ready, merge or create a Pull Request from the feature branch into main.
+
+Use --ff-only to avoid accidental merge commits when updating from GitHub.
+
+
+---
+
+Would you like me to also expand this note with a short **“workflow example”** (like: *devel
 
 
 
