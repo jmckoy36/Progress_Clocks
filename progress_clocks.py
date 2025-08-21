@@ -155,10 +155,14 @@ class ClockBase(ttk.Frame):
     """Shared bits: title, invert, notes button, canvas, basic (de)serialize contract."""
     TYPE = "base"
 
-    def __init__(self, master, initial_title="Clock", inverted=False, notes=""):
+    def __init__(self, master, initial_title="Clock", inverted=False, notes="", shared_inverted_var=None):
         super().__init__(master)
         self.title_var = tk.StringVar(value=initial_title)
-        self.inverted = tk.BooleanVar(value=bool(inverted))
+
+        # Support shared dark-mode var (used by Racing container later)
+        self._uses_shared_inverted = shared_inverted_var is not None
+        self.inverted = shared_inverted_var or tk.BooleanVar(value=bool(inverted))
+
         self.notes = notes or ""
 
         for c in range(8):
@@ -170,14 +174,20 @@ class ClockBase(ttk.Frame):
         ent.grid(row=0, column=1, columnspan=3, sticky="we", padx=6, pady=(8,0))
         ent.bind("<KeyRelease>", lambda e: self.draw())
 
-        inv = ttk.Checkbutton(self, text="Dark Mode", variable=self.inverted, command=self._on_theme_changed)
-        inv.grid(row=0, column=4, padx=(6, 10), pady=(8,0), sticky="w")
+        # Only render a local Dark Mode checkbox if not using a shared one
+        if not self._uses_shared_inverted:
+            inv = ttk.Checkbutton(self, text="Dark Mode", variable=self.inverted, command=self._on_theme_changed)
+            inv.grid(row=0, column=4, padx=(6, 10), pady=(8,0), sticky="w")
+        else:
+            # When shared, listen for changes to redraw
+            self.inverted.trace_add("write", lambda *_: self._on_theme_changed())
 
         ttk.Button(self, text="Notes", command=self.open_notes).grid(row=0, column=5, padx=6, pady=(8,0))
 
         self.canvas = tk.Canvas(self, bg="white", highlightthickness=0)
         self.canvas.grid(row=1, column=0, columnspan=8, sticky="nsew", padx=8, pady=8)
         self.canvas.bind("<Configure>", lambda e: self.draw())
+
 
     def _on_theme_changed(self):
         """Hook for subclasses when theme flips; default just redraws."""
@@ -204,28 +214,46 @@ class DangerClockFrame(ClockBase):
     TYPE = "danger"
 
     def __init__(self, master, initial_title="Danger Clock", segments=4, filled=0,
-                 inverted=False, fill_color=None, notes=""):
-        super().__init__(master, initial_title=initial_title, inverted=inverted, notes=notes)
-        self.segments = tk.IntVar(value=int(segments))
+                 inverted=False, fill_color=None, notes="",
+                 shared_segments_var=None, shared_inverted_var=None):
+        # Pass shared_inverted_var up to base so it can hide its local Dark Mode checkbox when shared
+        super().__init__(master, initial_title=initial_title, inverted=inverted, notes=notes,
+                         shared_inverted_var=shared_inverted_var)
+
+        # --- Segments: allow a shared IntVar (used by Racing container later) ---
+        self._uses_shared_segments = shared_segments_var is not None
+        self.segments = shared_segments_var or tk.IntVar(value=int(segments))
+
         # Track each segment as filled (True) or empty (False)
-        self.filled = [False] * int(segments)
-        for i in range(min(int(filled), int(segments))):
+        self.filled = [False] * int(self.segments.get())
+        for i in range(min(int(filled), int(self.segments.get()))):
             self.filled[i] = True
-        self.fill_color = fill_color or ("#000000" if not inverted else "#FFFFFF")
+
+        self.fill_color = fill_color or ("#000000" if not self.inverted.get() else "#FFFFFF")
+
         # --- Labels state ---
-        self.labels = [""] * int(segments)          # one label per segment
+        self.labels = [""] * int(self.segments.get())          # one label per segment
         self.show_labels = tk.BooleanVar(value=False)
+
         # Click bindings: left = fill, right = un-fill
         self.canvas.bind("<Button-1>", self._on_left_click)   # left click
         self.canvas.bind("<Button-3>", self._on_right_click)  # right click (Windows/Linux)
-
-        ttk.Label(self, text="Segments:").grid(row=0, column=6, sticky="e", padx=6, pady=(8,0))
-        seg_box = ttk.Combobox(self, state="readonly", values=SEGMENT_CHOICES, width=6, textvariable=self.segments)
-        seg_box.grid(row=0, column=7, padx=6, pady=(8,0), sticky="w")
-        seg_box.bind("<<ComboboxSelected>>", lambda e: self._clamp_and_draw())
-
         self.canvas.bind("<Double-1>", self._on_double_click)  # optional: edit one label
 
+        # --- Segments UI (hidden when shared) ---
+        # Keep references so we can hide/skip when shared
+        self._segments_label = None
+        self._segments_combo = None
+        if not self._uses_shared_segments:
+            ttk.Label(self, text="Segments:").grid(row=0, column=6, sticky="e", padx=6, pady=(8,0))
+            seg_box = ttk.Combobox(self, state="readonly", values=SEGMENT_CHOICES, width=6, textvariable=self.segments)
+            seg_box.grid(row=0, column=7, padx=6, pady=(8,0), sticky="w")
+            seg_box.bind("<<ComboboxSelected>>", lambda e: self._clamp_and_draw())
+            self._segments_label = True  # marker that UI exists
+            self._segments_combo = seg_box
+        else:
+            # When segments are shared, listen for changes to resize/redraw
+            self.segments.trace_add("write", lambda *_: self._clamp_and_draw())
 
         btns = ttk.Frame(self)
         btns.grid(row=2, column=0, columnspan=8, pady=(0,10))
@@ -244,13 +272,14 @@ class DangerClockFrame(ClockBase):
                         command=self.draw).pack(side="left", padx=12)
         ttk.Button(btns, text="Edit Labels", command=self.edit_labels).pack(side="left", padx=6)
 
-
+        # Keyboard shortcuts
         self.bind_all("+", lambda e: self.increase())
         self.bind_all("-", lambda e: self.decrease())
         self.bind_all("<r>", lambda e: self.reset())
         self.bind_all("<R>", lambda e: self.reset())
 
         self.draw()
+
 
     def _on_left_click(self, event):
         """Fill the clicked segment (turn it on)."""
