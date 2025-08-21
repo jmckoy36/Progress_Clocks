@@ -212,6 +212,9 @@ class DangerClockFrame(ClockBase):
         for i in range(min(int(filled), int(segments))):
             self.filled[i] = True
         self.fill_color = fill_color or ("#000000" if not inverted else "#FFFFFF")
+        # --- Labels state ---
+        self.labels = [""] * int(segments)          # one label per segment
+        self.show_labels = tk.BooleanVar(value=False)
         # Click bindings: left = fill, right = un-fill
         self.canvas.bind("<Button-1>", self._on_left_click)   # left click
         self.canvas.bind("<Button-3>", self._on_right_click)  # right click (Windows/Linux)
@@ -220,6 +223,9 @@ class DangerClockFrame(ClockBase):
         seg_box = ttk.Combobox(self, state="readonly", values=SEGMENT_CHOICES, width=6, textvariable=self.segments)
         seg_box.grid(row=0, column=7, padx=6, pady=(8,0), sticky="w")
         seg_box.bind("<<ComboboxSelected>>", lambda e: self._clamp_and_draw())
+
+        self.canvas.bind("<Double-1>", self._on_double_click)  # optional: edit one label
+
 
         btns = ttk.Frame(self)
         btns.grid(row=2, column=0, columnspan=8, pady=(0,10))
@@ -231,6 +237,13 @@ class DangerClockFrame(ClockBase):
         ttk.Button(btns, text="Fill Color", command=self.choose_fill_color).pack(side="left", padx=12)
         self.fill_preview = tk.Label(btns, width=10, bg=self.fill_color, relief="sunken")
         self.fill_preview.pack(side="left")
+
+        # Labels: show/hide + edit
+        ttk.Checkbutton(btns, text="Show Labels",
+                        variable=self.show_labels,
+                        command=self.draw).pack(side="left", padx=12)
+        ttk.Button(btns, text="Edit Labels", command=self.edit_labels).pack(side="left", padx=6)
+
 
         self.bind_all("+", lambda e: self.increase())
         self.bind_all("-", lambda e: self.decrease())
@@ -308,8 +321,10 @@ class DangerClockFrame(ClockBase):
             self.draw()
 
     def _clamp_and_draw(self):
-        # Ensure the boolean list matches the new segments value (from the combobox).
-        self._resize_filled_to(int(self.segments.get()))
+        # Ensure the lists match the new segments value (from the combobox).
+        target = int(self.segments.get())
+        self._resize_filled_to(target)
+        self._resize_labels_to(target)
         self.draw()
 
     def increase(self):
@@ -389,6 +404,42 @@ class DangerClockFrame(ClockBase):
         c.create_oval(x0, y0, x1, y1, width=LINE_W, outline=colors["fg"])
         c.create_oval(cx-3, cy-3, cx+3, cy+3, fill=colors["fg"], outline=colors["fg"])
 
+        # ----- Labels (on top) -----
+        if self.show_labels.get():
+            seg_count = max(1, int(self.segments.get()))
+            seg_span = 360 / seg_count
+            label_r = r * 0.60  # distance from center for text
+
+            for i in range(seg_count):
+                text = (self.labels[i] if i < len(self.labels) else "").strip()
+                if not text:
+                    continue
+
+                # mid-angle of the wedge (drawing is clockwise)
+                start_deg = 90 - (i * seg_span)
+                mid_deg = start_deg - (seg_span / 2)
+                ang = math.radians(mid_deg)
+
+                tx = cx + label_r * math.cos(ang)
+                ty = cy - label_r * math.sin(ang)
+
+                # Choose a readable text color:
+                # - if the segment is filled, contrast against the fill color
+                # - otherwise, use the normal foreground color
+                if (i < len(self.filled)) and self.filled[i]:
+                    tcolor = _contrast_text_color(self.fill_color)
+                else:
+                    tcolor = colors["fg"]
+
+                self.canvas.create_text(
+                    tx, ty,
+                    text=text,
+                    fill=tcolor,
+                    font=("Arial", 11, "bold"),
+                    justify="center",
+                )
+
+
     def _on_theme_changed(self):
         """
         When toggling Dark Mode:
@@ -426,6 +477,8 @@ class DangerClockFrame(ClockBase):
             "segments": int(self.segments.get()),
             "filled": int(sum(self.filled)),  # keep for backward compatibility
             "filled_list": list(bool(v) for v in self.filled),  # NEW: exact pattern
+            "labels": list(self.labels),  # NEW
+            "show_labels": bool(self.show_labels.get()),  # NEW
             "inverted": bool(self.inverted.get()),
             "fill_color": self.fill_color,
             "notes": self.notes,
@@ -439,28 +492,40 @@ class DangerClockFrame(ClockBase):
         self.fill_color = data.get("fill_color", self.fill_color)
         self.notes = data.get("notes", "")
 
-        # ensure list length matches segments
+        # ensure list lengths match segments
         segs = int(self.segments.get())
         self._resize_filled_to(segs)
+        self._resize_labels_to(segs)
 
-        # NEW: prefer exact pattern if provided
+        # prefer exact fill pattern if present
         flist = data.get("filled_list")
         if isinstance(flist, list) and len(flist) > 0:
-            # coerce every entry to bool, then resize/truncate to segment count
             pattern = [bool(v) for v in flist][:segs]
             if len(pattern) < segs:
                 pattern += [False] * (segs - len(pattern))
             self.filled = pattern
         else:
-            # fallback for old files that only stored the count
             count = int(data.get("filled", 0))
             self._set_fill_count(count)
+
+        # labels + toggle
+        lbls = data.get("labels")
+        if isinstance(lbls, list):
+            lbls = [str(v) if v is not None else "" for v in lbls][:segs]
+            if len(lbls) < segs:
+                lbls += [""] * (segs - len(lbls))
+            self.labels = lbls
+        else:
+            self.labels = [""] * segs
+
+        self.show_labels.set(bool(data.get("show_labels", False)))
 
         try:
             self.fill_preview.configure(bg=self.fill_color)
         except Exception:
             pass
         self.draw()
+
 
     def _resize_filled_to(self, new_count: int):
         """Keep self.filled list the same length as self.segments."""
@@ -479,6 +544,77 @@ class DangerClockFrame(ClockBase):
     def _redraw_circle(self):
         self.draw()
 
+    def _resize_labels_to(self, new_count: int):
+        new_count = int(new_count)
+        cur = len(self.labels)
+        if new_count > cur:
+            self.labels += [""] * (new_count - cur)
+        elif new_count < cur:
+            self.labels = self.labels[:new_count]
+
+    def edit_labels(self):
+        """Simple modal to edit all segment labels at once."""
+        segs = int(self.segments.get())
+        self._resize_labels_to(segs)
+
+        top = tk.Toplevel(self)
+        top.title("Edit Segment Labels")
+        top.transient(self.winfo_toplevel())
+        top.grab_set()
+
+        frm = ttk.Frame(top, padding=8)
+        frm.pack(fill="both", expand=True)
+
+        entries = []
+        for i in range(segs):
+            row = ttk.Frame(frm)
+            row.pack(fill="x", pady=2)
+            ttk.Label(row, text=f"Segment {i}").pack(side="left", padx=(0,8))
+            e = ttk.Entry(row, width=32)
+            e.pack(side="left", fill="x", expand=True)
+            e.insert(0, self.labels[i] or "")
+            entries.append(e)
+
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x", pady=(8,0))
+
+        def do_save():
+            for i, e in enumerate(entries):
+                self.labels[i] = e.get().strip()
+            top.destroy()
+            self.draw()
+
+        def do_cancel():
+            top.destroy()
+
+        ttk.Button(btns, text="Save Labels", command=do_save).pack(side="left")
+        ttk.Button(btns, text="Cancel", command=do_cancel).pack(side="right")
+
+        # focus first entry
+        top.after(50, lambda: (entries[0].focus_set(), entries[0].select_range(0, 'end')))
+        self.wait_window(top)
+
+    def _on_double_click(self, event):
+        idx = self._pos_to_segment(event.x, event.y)
+        if idx is None:
+            return
+        # quick prompt
+        top = tk.Toplevel(self)
+        top.title(f"Label for Segment {idx}")
+        top.transient(self.winfo_toplevel()); top.grab_set()
+        frm = ttk.Frame(top, padding=8); frm.pack(fill="both", expand=True)
+        ent = ttk.Entry(frm, width=36)
+        ent.pack(fill="x"); ent.insert(0, self.labels[idx] or "")
+        btns = ttk.Frame(frm); btns.pack(fill="x", pady=(8,0))
+        def ok():
+            self.labels[idx] = ent.get().strip()
+            top.destroy(); self.draw()
+        def cancel():
+            top.destroy()
+        ttk.Button(btns, text="OK", command=ok).pack(side="left")
+        ttk.Button(btns, text="Cancel", command=cancel).pack(side="right")
+        top.after(50, lambda: (ent.focus_set(), ent.select_range(0, 'end')))
+        self.wait_window(top)
 
 # ---------------------------
 # App shell (minimal)
