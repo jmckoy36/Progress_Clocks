@@ -159,28 +159,19 @@ class ClockBase(ttk.Frame):
         super().__init__(master)
         self.title_var = tk.StringVar(value=initial_title)
 
+        self.notes = notes or ""
+
         # Support shared dark-mode var (used by Racing container later)
         self._uses_shared_inverted = shared_inverted_var is not None
         self.inverted = shared_inverted_var or tk.BooleanVar(value=bool(inverted))
+        self._inv_trace_id = None
 
-        self.notes = notes or ""
-
-        for c in range(8):
-            self.columnconfigure(c, weight=1)
-        self.rowconfigure(1, weight=1)
-
-        ttk.Label(self, text="Title:").grid(row=0, column=0, sticky="e", padx=6, pady=(8,0))
-        ent = ttk.Entry(self, textvariable=self.title_var, width=28, justify="center")
-        ent.grid(row=0, column=1, columnspan=3, sticky="we", padx=6, pady=(8,0))
-        ent.bind("<KeyRelease>", lambda e: self.draw())
-
-        # Only render a local Dark Mode checkbox if not using a shared one
         if not self._uses_shared_inverted:
             inv = ttk.Checkbutton(self, text="Dark Mode", variable=self.inverted, command=self._on_theme_changed)
-            inv.grid(row=0, column=4, padx=(6, 10), pady=(8,0), sticky="w")
+            inv.grid(row=0, column=4, padx=(6, 10), pady=(8, 0), sticky="w")
         else:
-            # When shared, listen for changes to redraw
-            self.inverted.trace_add("write", lambda *_: self._on_theme_changed())
+            # When shared, listen for changes to redraw (remember the trace id so we can remove it)
+            self._inv_trace_id = self.inverted.trace_add("write", lambda *_: self._on_theme_changed())
 
         ttk.Button(self, text="Notes", command=self.open_notes).grid(row=0, column=5, padx=6, pady=(8,0))
 
@@ -188,6 +179,15 @@ class ClockBase(ttk.Frame):
         self.canvas.grid(row=1, column=0, columnspan=8, sticky="nsew", padx=8, pady=8)
         self.canvas.bind("<Configure>", lambda e: self.draw())
 
+    def destroy(self):
+        # detach shared dark-mode trace if any
+        try:
+            if getattr(self, "_uses_shared_inverted", False) and getattr(self, "_inv_trace_id", None):
+                self.inverted.trace_remove("write", self._inv_trace_id)
+                self._inv_trace_id = None
+        except Exception:
+            pass
+        super().destroy()
 
     def _on_theme_changed(self):
         """Hook for subclasses when theme flips; default just redraws."""
@@ -223,41 +223,46 @@ class DangerClockFrame(ClockBase):
         # --- Segments: allow a shared IntVar (used by Racing container later) ---
         self._uses_shared_segments = shared_segments_var is not None
         self.segments = shared_segments_var or tk.IntVar(value=int(segments))
+        self._seg_trace_id = None
 
-        # Track each segment as filled (True) or empty (False)
-        self.filled = [False] * int(self.segments.get())
-        for i in range(min(int(filled), int(self.segments.get()))):
-            self.filled[i] = True
 
-        self.fill_color = fill_color or ("#000000" if not self.inverted.get() else "#FFFFFF")
-
-        # --- Labels state ---
-        self.labels = [""] * int(self.segments.get())          # one label per segment
-        self.show_labels = tk.BooleanVar(value=False)
-
-        # Click bindings: left = fill, right = un-fill
-        self.canvas.bind("<Button-1>", self._on_left_click)   # left click
-        self.canvas.bind("<Button-3>", self._on_right_click)  # right click (Windows/Linux)
-        self.canvas.bind("<Double-1>", self._on_double_click)  # optional: edit one label
-
-        # --- Segments UI (hidden when shared) ---
-        # Keep references so we can hide/skip when shared
-        self._segments_label = None
-        self._segments_combo = None
         if not self._uses_shared_segments:
-            ttk.Label(self, text="Segments:").grid(row=0, column=6, sticky="e", padx=6, pady=(8,0))
+            ttk.Label(self, text="Segments:").grid(row=0, column=6, sticky="e", padx=6, pady=(8, 0))
             seg_box = ttk.Combobox(self, state="readonly", values=SEGMENT_CHOICES, width=6, textvariable=self.segments)
-            seg_box.grid(row=0, column=7, padx=6, pady=(8,0), sticky="w")
+            seg_box.grid(row=0, column=7, padx=6, pady=(8, 0), sticky="w")
             seg_box.bind("<<ComboboxSelected>>", lambda e: self._clamp_and_draw())
-            self._segments_label = True  # marker that UI exists
-            self._segments_combo = seg_box
         else:
             # When segments are shared, listen for changes to resize/redraw
-            self.segments.trace_add("write", lambda *_: self._clamp_and_draw())
+            self._seg_trace_id = self.segments.trace_add("write", lambda *_: self._clamp_and_draw())
+
+        # ---- Initialize state that the controls depend on ----
+        seg_count = int(self.segments.get())
+
+        # filled pattern: first `filled` True, rest False
+        self.filled = [False] * seg_count
+        for i in range(min(int(filled), seg_count)):
+            self.filled[i] = True
+
+        # labels + toggle
+        self.labels = [""] * seg_count
+        self.show_labels = tk.BooleanVar(value=False)
+
+        # default fill color: black in Light Mode, white in Dark Mode, unless a color was passed
+        self.fill_color = fill_color or ("#FFFFFF" if self.inverted.get() else "#000000")
+
+        # mouse bindings (click to fill/unfill, double-click to edit one label)
+        self.canvas.bind("<Button-1>", self._on_left_click)
+        self.canvas.bind("<Button-3>", self._on_right_click)
+        self.canvas.bind("<Double-1>", self._on_double_click)
 
         # --- Controls (two rows so they don't get cut off when width is tight) ---
         # Give the buttons row a little guaranteed height
         self.rowconfigure(2, minsize=56)
+
+        # Ensure the canvas row expands even with the second controls row present
+        self.rowconfigure(1, weight=1)
+        for col in range(8):
+            self.columnconfigure(col, weight=1)
 
         btns = ttk.Frame(self)
         btns.grid(row=2, column=0, columnspan=8, pady=(0, 10), sticky="we")
@@ -289,8 +294,18 @@ class DangerClockFrame(ClockBase):
         self.bind_all("<r>", lambda e: self.reset())
         self.bind_all("<R>", lambda e: self.reset())
 
-        self.draw()
+        # Defer the first draw until after the widget has a real size
+        self.after_idle(self.draw)
 
+    def destroy(self):
+        # detach shared segments trace if any, then let base remove its trace, then destroy
+        try:
+            if getattr(self, "_uses_shared_segments", False) and getattr(self, "_seg_trace_id", None):
+                self.segments.trace_remove("write", self._seg_trace_id)
+                self._seg_trace_id = None
+        except Exception:
+            pass
+        super().destroy()
 
     def _on_left_click(self, event):
         """Fill the clicked segment (turn it on)."""
@@ -387,6 +402,22 @@ class DangerClockFrame(ClockBase):
         self.draw()
 
     def draw(self):
+        # Bail out cleanly if widget/canvas is gone (during teardown)
+        if not self.winfo_exists():
+            return
+        c = getattr(self, "canvas", None)
+        if not c or not c.winfo_exists():
+            return
+
+        # If the canvas is still tiny (e.g., first layout pass), wait and redraw later
+        w = int(c.winfo_width() or 0)
+        h = int(c.winfo_height() or 0)
+        if w < 120 or h < 120:
+            self.after(50, self.draw)
+            return
+
+        c.delete("all")
+        c.delete("all")
         c = self.canvas
         c.delete("all")
         colors = self._colors()
@@ -749,26 +780,6 @@ class RacingClocksFrame(ttk.Frame):
         self._relayout()
         self._update_dial_buttons()
 
-    def _remove_dial(self):
-        if len(self.dials) <= 2:
-            return
-        dial = self.dials.pop()
-        try:
-            dial.destroy()
-        except Exception:
-            pass
-        self._relayout()
-        self._update_dial_buttons()
-
-    def _update_dial_buttons(self):
-        add_state = "disabled" if len(self.dials) >= self.MAX_DIALS else "normal"
-        rm_state  = "disabled" if len(self.dials) <= 2 else "normal"
-        try:
-            self.add_btn.configure(state=add_state)
-            self.remove_btn.configure(state=rm_state)
-        except Exception:
-            pass
-
     def _relayout(self):
         # place dials in rows of 3 (up to 6 total = 3x2)
         for w in self.dials:
@@ -806,6 +817,57 @@ class RacingClocksFrame(ttk.Frame):
             dial.destroy()
         except Exception:
             pass
+        self._relayout()
+        self._update_dial_buttons()
+
+    # ---- Persistence ----
+    def to_dict(self) -> dict:
+        return {
+            "type": self.TYPE,
+            "title": self.title_var.get(),
+            "segments": int(self.segments_var.get()),
+            "inverted": bool(self.inverted_var.get()),
+            "notes": self.notes,
+            # Save each dial using its own serializer
+            "dials": [d.to_dict() for d in self.dials],
+        }
+
+    def from_dict(self, data: dict):
+        # Tab-level fields first (so shared vars are set before dials read)
+        self.title_var.set(data.get("title", "Racing Clock"))
+        self.segments_var.set(int(data.get("segments", 4)))
+        self.inverted_var.set(bool(data.get("inverted", False)))
+        self.notes = data.get("notes", "")
+
+        # Rebuild dials from saved data
+        dials_data = data.get("dials") or []
+        self._rebuild_from_dials(dials_data)
+
+    def _rebuild_from_dials(self, dials_data: list):
+        # Clear old dials
+        for d in self.dials:
+            try:
+                d.destroy()
+            except Exception:
+                pass
+        self.dials.clear()
+
+        # Build new dials; ensure at least two
+        target = max(2, min(len(dials_data) or 2, self.MAX_DIALS))
+        for i in range(target):
+            self._add_dial()
+
+        # Feed dicts into dials, but remove per-dial "segments" and "inverted"
+        # so they don't fight with the shared tab-level vars
+        for dial, dd in zip(self.dials, dials_data):
+            if not isinstance(dd, dict):
+                continue
+            dd = dict(dd)  # shallow copy
+            dd.pop("segments", None)
+            dd.pop("inverted", None)
+            dial.from_dict(dd)
+
+        # If there were fewer saved dials than current, clear extras (shouldn’t happen with target calc)
         self._relayout()
         self._update_dial_buttons()
 
@@ -992,7 +1054,7 @@ class MultiClockApp(tk.Tk):
         if current:
             self.nb.forget(current)
 
-    def add_racing_clocks(self, title=None, notes=""):
+    def add_racing_clocks(self, title=None, notes="", initial_dials=2):
         # Auto-number default titles "Racing Clock n"
         existing = []
         for tab_id in self.nb.tabs():
@@ -1003,21 +1065,21 @@ class MultiClockApp(tk.Tk):
         default_title = _next_numbered_title(existing, base)
         title = (title or default_title).strip()
 
-        frame = RacingClocksFrame(self.nb, initial_title=title, notes=notes)
+        # pass initial_dials through (not used on load; only for user-created tabs)
+        frame = RacingClocksFrame(self.nb, initial_title=title, notes=notes, initial_dials=initial_dials)
         self.nb.add(frame, text=self._short_title(title))
 
-        # Keep tab text synced to the entry
         def sync(*_):
             try:
                 idx = self.nb.index(frame)
                 self.nb.tab(idx, text=self._short_title(frame.title_var.get()))
             except Exception:
                 pass
+
         frame.title_var.trace_add("write", lambda *_: sync())
 
         self.nb.select(frame)
         return frame
-
 
     # ---------- Save / Load ----------
 
@@ -1051,15 +1113,12 @@ class MultiClockApp(tk.Tk):
         try:
             self._load_from_path(Path(path))
             self.current_session_path = Path(path)  # remember for autosave
-            # NEW:
+            # record for Settings
             self.settings["last_session_path"] = str(self.current_session_path)
             save_settings(self.settings)
             messagebox.showinfo("Loaded", f"Loaded from:\n{path}")
         except Exception as e:
             messagebox.showerror("Load failed", f"{e}")
-
-        self.current_session_path = Path(path)  # remember for autosave
-        messagebox.showinfo("Loaded", f"Loaded from:\n{path}")
 
     def _load_from_path(self, path: Path):
         """Load a session JSON from a specific path (no file chooser)."""
@@ -1072,12 +1131,21 @@ class MultiClockApp(tk.Tk):
 
         # Rebuild from saved items
         for item in data.get("items", []):
-            if item.get("type") == DangerClockFrame.TYPE:
+            t = item.get("type")
+            if t == DangerClockFrame.TYPE:
                 # Create a tab (title will be corrected by from_dict)
                 frame = self.add_danger_clock(title=item.get("title", "Danger Clock"))
-                # Apply full state from JSON (including filled_list)
                 if hasattr(frame, "from_dict"):
                     frame.from_dict(item)
+
+            elif t == getattr(RacingClocksFrame, "TYPE", "racing"):
+                frame = self.add_racing_clocks(title=item.get("title", "Racing Clock"))
+                if hasattr(frame, "from_dict"):
+                    frame.from_dict(item)
+
+            else:
+                # Unknown tab type; skip gracefully
+                continue
 
     # ---------- Helpers ----------
 
