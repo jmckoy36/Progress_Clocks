@@ -124,6 +124,8 @@ def open_notes_modal(parent, initial_text: str, title_text: str) -> str | None:
 
 # ---------------------------
 # Shared ClockBase (very small)
+#     The ClockBase(ttk.Frame) class is a base class that holds shared logic for all clock types.
+#     It sets up common things like a title box, segment selector, etc.
 # ---------------------------
 class ClockBase(ttk.Frame):
     """Shared bits: title, invert, notes button, canvas, basic (de)serialize contract."""
@@ -172,6 +174,7 @@ class ClockBase(ttk.Frame):
 
 # ---------------------------
 # Danger Clock (circular fill)
+#     The DangerClockFrame(ClockBase): class this is where your circular drawing lives.
 # ---------------------------
 class DangerClockFrame(ClockBase):
     TYPE = "danger"
@@ -180,8 +183,14 @@ class DangerClockFrame(ClockBase):
                  inverted=False, fill_color=None, notes=""):
         super().__init__(master, initial_title=initial_title, inverted=inverted, notes=notes)
         self.segments = tk.IntVar(value=int(segments))
-        self.filled = int(filled)
+        # Track each segment as filled (True) or empty (False)
+        self.filled = [False] * int(segments)
+        for i in range(min(int(filled), int(segments))):
+            self.filled[i] = True
         self.fill_color = fill_color or ("#000000" if not inverted else "#FFFFFF")
+        # Click bindings: left = fill, right = un-fill
+        self.canvas.bind("<Button-1>", self._on_left_click)   # left click
+        self.canvas.bind("<Button-3>", self._on_right_click)  # right click (Windows/Linux)
 
         ttk.Label(self, text="Segments:").grid(row=0, column=6, sticky="e", padx=6, pady=(8,0))
         seg_box = ttk.Combobox(self, state="readonly", values=SEGMENT_CHOICES, width=6, textvariable=self.segments)
@@ -206,6 +215,66 @@ class DangerClockFrame(ClockBase):
 
         self.draw()
 
+    def _on_left_click(self, event):
+        """Fill the clicked segment (turn it on)."""
+        idx = self._pos_to_segment(event.x, event.y)
+        if idx is not None:
+            self.filled[idx] = True
+            self._redraw_circle()
+
+    def _on_right_click(self, event):
+        """Un-fill the clicked segment (turn it off)."""
+        idx = self._pos_to_segment(event.x, event.y)
+        if idx is not None:
+            self.filled[idx] = False
+            self._redraw_circle()
+
+    def _pos_to_segment(self, x, y):
+        """
+        Given a canvas (x,y) click, return the segment index 0..N-1,
+        or None if the click is outside the circle.
+        """
+        import math
+
+        seg_count = int(self.segments.get())
+        if seg_count <= 0:
+            return None
+
+        # Use the exact center/radius computed in draw()
+        cx = getattr(self, "center_x", None)
+        cy = getattr(self, "center_y", None)
+        r = getattr(self, "radius", None)
+
+        # Fallback (shouldn't be needed once draw() has run)
+        if cx is None or cy is None or r is None:
+            w = int(self.canvas.winfo_width() or self.canvas.cget("width"))
+            h = int(self.canvas.winfo_height() or self.canvas.cget("height"))
+            size = min(w, h)
+            pad = size * 0.05
+            cx, cy = w / 2, h / 2
+            r = (size / 2) - pad
+
+        # Outside the circle? Ignore.
+        dx, dy = x - cx, y - cy
+        if (dx * dx + dy * dy) > (r * r):
+            return None
+
+        # Angle from +X axis with Y flipped (so "up" is positive)
+        angle_deg = math.degrees(math.atan2(-dy, dx)) % 360
+
+        # Our wedges are drawn CLOCKWISE from 12 o'clock:
+        #   start_deg = 90 - i*seg_span, extent = -seg_span
+        # So measure CLOCKWISE from top:
+        angle_clockwise_from_top = (90 - angle_deg) % 360
+
+        seg_span = 360 / seg_count
+        idx = int(angle_clockwise_from_top // seg_span)
+
+        # Clamp (safety)
+        if idx < 0: idx = 0
+        if idx >= seg_count: idx = seg_count - 1
+        return idx
+
     def choose_fill_color(self):
         (rgb, hexv) = colorchooser.askcolor(color=self.fill_color, title="Choose fill color")
         if hexv:
@@ -215,22 +284,27 @@ class DangerClockFrame(ClockBase):
             self.draw()
 
     def _clamp_and_draw(self):
-        if self.filled > self.segments.get():
-            self.filled = self.segments.get()
+        # Ensure the boolean list matches the new segments value (from the combobox).
+        self._resize_filled_to(int(self.segments.get()))
         self.draw()
 
     def increase(self):
-        if self.filled < self.segments.get():
-            self.filled += 1
+        # Increase count of filled segments by 1
+        current = sum(self.filled)
+        if current < int(self.segments.get()):
+            self._set_fill_count(current + 1)
             self.draw()
 
     def decrease(self):
-        if self.filled > 0:
-            self.filled -= 1
+        # Decrease count of filled segments by 1
+        current = sum(self.filled)
+        if current > 0:
+            self._set_fill_count(current - 1)
             self.draw()
 
     def reset(self):
-        self.filled = 0
+        # Clear all segments
+        self._set_fill_count(0)
         self.draw()
 
     def draw(self):
@@ -251,11 +325,33 @@ class DangerClockFrame(ClockBase):
         extent = 360 / segs
         start_base = 90
 
-        # filled slices
-        for i in range(self.filled):
-            start = start_base - i*extent
-            c.create_arc(x0, y0, x1, y1, start=start, extent=-extent,
-                         style=tk.PIESLICE, outline="", fill=self.fill_color)
+        # per-segment wedges (fill = True/False)
+        seg_count = max(1, int(self.segments.get()))
+        seg_span = 360 / seg_count
+
+        # store center/radius for click detection
+        self.center_x, self.center_y = cx, cy
+        self.radius = r
+
+        # clear any previously tagged arcs (if you ever redraw without clearing all)
+        # (Not strictly needed since we did c.delete("all") above, but harmless.)
+        c.delete("clock_arc")
+
+        for i in range(seg_count):
+            start_deg = 90 - (i * seg_span)           # put segment 0 at 12 o’clock
+            is_filled = (i < len(self.filled)) and self.filled[i]
+            fill_color = self.fill_color if is_filled else ""
+
+            c.create_arc(
+                x0, y0, x1, y1,
+                start=start_deg,
+                extent=-seg_span,                     # clockwise
+                style=tk.PIESLICE,
+                fill=fill_color,
+                outline="#111111",
+                width=2,
+                tags=("clock_arc",),
+            )
 
         # spokes
         for i in range(segs):
@@ -304,7 +400,7 @@ class DangerClockFrame(ClockBase):
             "type": self.TYPE,
             "title": self.title_var.get(),
             "segments": int(self.segments.get()),
-            "filled": int(self.filled),
+            "filled": int(sum(self.filled)),          # save count of filled segments
             "inverted": bool(self.inverted.get()),
             "fill_color": self.fill_color,
             "notes": self.notes,
@@ -313,7 +409,9 @@ class DangerClockFrame(ClockBase):
     def from_dict(self, data: dict):
         self.title_var.set(data.get("title", "Danger Clock"))
         self.segments.set(int(data.get("segments", 4)))
-        self.filled = int(data.get("filled", 0))
+        count = int(data.get("filled", 0))
+        self._resize_filled_to(int(self.segments.get()))
+        self._set_fill_count(count)
         self.inverted.set(bool(data.get("inverted", False)))
         self.fill_color = data.get("fill_color", self.fill_color)
         self.notes = data.get("notes", "")
@@ -321,8 +419,27 @@ class DangerClockFrame(ClockBase):
         except Exception: pass
         self.draw()
 
+    def _resize_filled_to(self, new_count: int):
+        """Keep self.filled list the same length as self.segments."""
+        new_count = int(new_count)
+        cur = len(self.filled)
+        if new_count > cur:
+            self.filled += [False] * (new_count - cur)
+        elif new_count < cur:
+            self.filled = self.filled[:new_count]
+
+    def _set_fill_count(self, n: int):
+        """Fill the first n segments True, rest False."""
+        n = max(0, min(int(n), int(self.segments.get())))
+        self.filled = [True]*n + [False]*(int(self.segments.get()) - n)
+
+    def _redraw_circle(self):
+        self.draw()
+
+
 # ---------------------------
 # App shell (minimal)
+#     This is the main window class.  It manages the overall application.
 # ---------------------------
 class MultiClockApp(tk.Tk):
     def __init__(self):
