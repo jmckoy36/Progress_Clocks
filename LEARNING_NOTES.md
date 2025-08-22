@@ -267,3 +267,43 @@ def __init__(...) inside the class → 4 spaces indent
 Code inside __init__ → 8 spaces indent
 
 Another def some_method(...) → also 4 spaces indent, with its own 8-space code inside.
+
+---
+In Pycharm, in the main part of the editor window, what are the green and blue lines next to the lines of code on the left?  What are the orange marks next to the code on the scrollbar to the right?
+ChatGPT said:
+
+Good question — those colored markers in PyCharm are change indicators and code analysis markers. Here’s what they mean:
+
+Left Gutter (next to line numbers)
+
+These appear after you’ve made changes to a file under version control (e.g., Git):
+
+Green line → The line is newly added since the last commit.
+
+Blue line → The line has been changed/edited compared to the last commit.
+
+Yellow/orange line → The line has been changed but not saved yet (i.e., modified in the editor buffer, not written to disk).
+
+No color → The line matches the version in Git (or the file has no changes).
+
+👉 You can hover over these markers to see the "before" version, and right-click them for quick rollback options.
+
+Right-hand Scrollbar (editor overview ruler)
+
+These marks give you a bird’s-eye view of issues in your code:
+
+Orange marks → Warnings (e.g., unused variables, potential bugs, style issues).
+
+Red marks → Errors (e.g., syntax errors, missing imports).
+
+Yellow marks → Weak warnings or suggestions (e.g., code style, deprecated usage).
+
+White/blue/green ticks → May also show bookmarks, breakpoints, or search results.
+
+👉 Clicking on these marks will jump you directly to the problem line.
+
+✅ Summary:
+
+Left gutter = version control changes.
+
+Right scrollbar = code analysis results & navigation.
