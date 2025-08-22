@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-Progress Clocks — Clean restart
-Step 1: Danger Clock only, minimal features (title, segments, fill, invert, notes).
+Progress Clocks Application
 """
+
+__version__ = "2.0.0"
+
 
 import json
 import math
