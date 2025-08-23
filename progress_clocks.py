@@ -1069,7 +1069,7 @@ class LinkedClocksFrame(ttk.Frame):
 
         self.dials: list[DangerClockFrame] = []
         self.timer_secs: list[tk.IntVar] = []      # per-dial configured countdown seconds
-        self.remaining: list[int] = []            # runtime remaining (ms)
+        self.elapsed_ms: list[int] = []  # NEW: runtime elapsed per dial (ms)
 
         # Build initial 2..6
         count = max(2, min(int(initial_dials or 2), self.MAX_DIALS))
@@ -1137,7 +1137,6 @@ class LinkedClocksFrame(ttk.Frame):
     def _on_tick(self):
         if not self._is_running:
             return
-        ...
 
         # find active dial (first incomplete)
         idx = next((i for i, d in enumerate(self.dials) if not d.is_complete()), None)
@@ -1154,12 +1153,31 @@ class LinkedClocksFrame(ttk.Frame):
             self._schedule_tick()
             return
 
-        # decrement remaining
-        self.remaining[idx] = max(0, self.remaining[idx] - self.TICK_MS)
-        if self.remaining[idx] == 0:
-            # time to fill ONE segment, then reset that dial's remaining
-            self.dials[idx].increase()
-            self.remaining[idx] = self.timer_secs[idx].get() * 1000
+        # ---- proportional timing branch ----
+        total_ms = max(0, self.timer_secs[idx].get() * 1000)
+        if total_ms == 0:
+            # no timer on this dial (shouldn't happen if validation passed)
+            self._redraw_overlays()
+            self._bind_serial_clicks()
+            self._schedule_tick()
+            return
+
+        # advance elapsed for the active dial
+        self.elapsed_ms[idx] = min(total_ms, self.elapsed_ms[idx] + self.TICK_MS)
+
+        # compute how many segments should be filled by now
+        segs = int(self.segments_var.get())
+        target_fill = int((self.elapsed_ms[idx] / total_ms) * segs)
+
+        # apply (idempotent)
+        self.dials[idx]._set_fill_count(min(target_fill, segs))
+        self.dials[idx].draw()
+
+        # if we’ve reached total time, ensure filled; next tick will move to next dial
+        if self.elapsed_ms[idx] >= total_ms:
+            self.dials[idx]._set_fill_count(segs)
+            self.dials[idx].draw()
+            # (Commit G: optional beep goes here)
 
         self._redraw_overlays()
         self._bind_serial_clicks()  # <-- NEW
@@ -1197,7 +1215,10 @@ class LinkedClocksFrame(ttk.Frame):
                 self._start_hint.pack(side="left", padx=(0, 8))
 
     def _reset_all_remaining(self):
-        self.remaining = [v.get() * 1000 for v in self.timer_secs]
+        # Proportional timing uses elapsed; remaining is derived
+        self.elapsed_ms = [0 for _ in self.dials]  # NEW
+        # If you’re keeping `remaining` around for overlay compatibility elsewhere, you can also refresh it:
+        # self.remaining = [v.get() * 1000 for v in self.timer_secs]
 
     def _redraw_overlays(self):
         show = bool(self._show_overlay.get())
@@ -1206,14 +1227,15 @@ class LinkedClocksFrame(ttk.Frame):
 
         for i, d in enumerate(self.dials):
             text = ""
-            if show and timers:
-                ms = self.remaining[i]
-                s = max(0, int(ms / 1000))
+            if show and self._timers_in_use() and self.timer_secs[i].get() > 0:
+                total = self.timer_secs[i].get() * 1000
+                rem_ms = max(0, total - (self.elapsed_ms[i] if i < len(self.elapsed_ms) else 0))
+                s = rem_ms // 1000
                 h, rem = divmod(s, 3600)
                 m, s = divmod(rem, 60)
                 text = f"{h:02d}:{m:02d}:{s:02d}"
             d._overlay_text = text
-            d._overlay_color = self.overlay_color.get()  # NEW: pass color to dial
+            d._overlay_color = self.overlay_color.get()
             d.draw()
 
     def _active_index(self) -> int | None:
@@ -1272,6 +1294,8 @@ class LinkedClocksFrame(ttk.Frame):
         var = tk.IntVar(value=0)  # store seconds
         ent = ttk.Entry(ctrl, width=10, justify="center")
         ent.pack(side="left", padx=(4, 8))
+        ttk.Label(ctrl, text="ⓘ fills segments evenly over total time", foreground="#666") \
+            .pack(side="left", padx=(8, 0))
 
         def parse_and_set(*_):
             txt = ent.get().strip()
@@ -1304,10 +1328,11 @@ class LinkedClocksFrame(ttk.Frame):
         # Store & place dial
         self.timer_secs.append(var)
         self.dials.append(dial)
-        self.remaining.append(0)
+        self.elapsed_ms.append(0)
 
         self._relayout()
         self._bind_serial_clicks()
+        self._validate_start_button()
 
     def _remove_dial(self):
         if len(self.dials) <= 2: return
@@ -1315,7 +1340,8 @@ class LinkedClocksFrame(ttk.Frame):
         try: d.destroy()
         except Exception: pass
         self.timer_secs.pop()
-        self.remaining.pop()
+        if self.elapsed_ms:
+            self.elapsed_ms.pop()
         self._relayout()
         self._validate_start_button()
         self._redraw_overlays()
@@ -1371,9 +1397,14 @@ class LinkedClocksFrame(ttk.Frame):
 
         # Rebuild dials
         for d in self.dials:
-            try: d.destroy()
-            except Exception: pass
-        self.dials.clear(); self.timer_secs.clear(); self.remaining.clear()
+            try:
+                d.destroy()
+            except Exception:
+                pass
+        self.dials.clear();
+        self.timer_secs.clear();
+        self.elapsed_ms.clear()
+
 
         dials_data = data.get("dials") or []
         target = max(2, min(len(dials_data) or 2, self.MAX_DIALS))
