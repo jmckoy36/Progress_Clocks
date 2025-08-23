@@ -10,7 +10,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
-## [2.1.1] - 2025-08-23
+## [2.2.0] - 2025-08-23
+
+### Added
+- Linked Clocks
+
 ### Changed
 - Danger Clocks: Settings button moved to the tab’s top bar for consistency.
 - Racing Clocks: Removed per‑dial Settings buttons; use the tab‑level **Settings** dialog only.
