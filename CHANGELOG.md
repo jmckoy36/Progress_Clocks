@@ -13,6 +13,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [v2.1.0] - 2025-08-23
 
 ### Added
+- App now remembers last window size and which monitor it was on; on next launch it reopens centered on that monitor 
+   instead of defaulting to the primary screen.
 - **Settings dialogs** for:
   - Linked Clocks: manage Dark Mode, Show Countdown Overlay, Enable Timer Alarms.
   - Racing Clocks: Dark Mode toggle.

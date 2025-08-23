@@ -39,6 +39,71 @@ SETTINGS_PATH = APP_DIR / "settings.json"
 # ---------------------------
 # Utilities (shared)
 # ---------------------------
+
+# ---- Multi-monitor helpers (center on last-used monitor) ----
+def _get_monitor_rect_from_point(x: int, y: int):
+    """
+    Windows: return (left, top, right, bottom) for the monitor containing point (x,y).
+    Others: return primary screen rect using Tk's screen size.
+    """
+    try:
+        import sys
+        if sys.platform.startswith("win"):
+            import ctypes
+            from ctypes import wintypes
+
+            MONITOR_DEFAULTTONEAREST = 2
+
+            class RECT(ctypes.Structure):
+                _fields_ = [("left", ctypes.c_long),
+                            ("top", ctypes.c_long),
+                            ("right", ctypes.c_long),
+                            ("bottom", ctypes.c_long)]
+
+            class MONITORINFO(ctypes.Structure):
+                _fields_ = [("cbSize", ctypes.c_ulong),
+                            ("rcMonitor", RECT),
+                            ("rcWork", RECT),
+                            ("dwFlags", ctypes.c_ulong)]
+
+            user32 = ctypes.windll.user32
+            user32.MonitorFromPoint.restype = wintypes.HANDLE
+            user32.MonitorFromPoint.argtypes = (wintypes.POINT, ctypes.c_ulong)
+
+            pt = wintypes.POINT(x, y)
+            hmon = user32.MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST)
+            if hmon:
+                mi = MONITORINFO()
+                mi.cbSize = ctypes.sizeof(MONITORINFO)
+                if user32.GetMonitorInfoW(hmon, ctypes.byref(mi)):
+                    r = mi.rcWork  # use work area (excludes taskbar)
+                    return (int(r.left), int(r.top), int(r.right), int(r.bottom))
+    except Exception:
+        pass
+
+    # Fallback: center on primary screen using Tk (filled in by caller if needed)
+    try:
+        # We may not have a Tk root here; caller will handle fallback sizes.
+        import tkinter as _tk
+        _tmp = _tk.Tk()
+        _tmp.update_idletasks()
+        w = _tmp.winfo_screenwidth()
+        h = _tmp.winfo_screenheight()
+        _tmp.destroy()
+        return (0, 0, int(w), int(h))
+    except Exception:
+        return (0, 0, 1920, 1080)  # hard fallback
+
+def _center_geometry_on_rect(width: int, height: int, rect: tuple[int, int, int, int]) -> str:
+    """Return a Tk geometry string WxH+X+Y centered in the given (l,t,r,b) rect."""
+    l, t, r, b = rect
+    mw = max(1, r - l)
+    mh = max(1, b - t)
+    x = l + max(0, (mw - width) // 2)
+    y = t + max(0, (mh - height) // 2)
+    return f"{int(width)}x{int(height)}+{int(x)}+{int(y)}"
+
+
 def _hex_to_rgb(hex_color: str):
     s = hex_color.strip().lstrip("#")
     if len(s) == 3:
@@ -82,6 +147,8 @@ def load_settings() -> dict:
     return {
         "open_last_on_launch": False,    # user toggle
         "last_session_path": None,       # updated after a successful save/load
+        "last_window_center": None,      # [cx, cy] in virtual screen coords
+        "last_window_size": [900, 650],  # [w, h]
     }
 
 def save_settings(data: dict) -> None:
@@ -1613,11 +1680,31 @@ class MultiClockApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Progress Clocks")
-        self.geometry("900x650")
         self.minsize(700, 500)
 
         # Load settings first
         self.settings = load_settings()
+
+        # Position window: center on the monitor that contained the app last time.
+        try:
+            # Get preferred size from settings (fallback to default)
+            w, h = self.settings.get("last_window_size") or [900, 650]
+            w = int(w); h = int(h)
+
+            last_center = self.settings.get("last_window_center")
+            if isinstance(last_center, (list, tuple)) and len(last_center) == 2:
+                cx, cy = int(last_center[0]), int(last_center[1])
+                rect = _get_monitor_rect_from_point(cx, cy)
+                geom = _center_geometry_on_rect(w, h, rect)
+                self.geometry(geom)
+            else:
+                # No prior center—use default size; Tk will place it; optionally center on primary
+                rect = _get_monitor_rect_from_point(0, 0)
+                self.geometry(_center_geometry_on_rect(w, h, rect))
+        except Exception:
+            # Absolute fallback
+            self.geometry("900x650")
+
 
         # Remember last save/load file path for autosave to use.
         # (If we auto-load, we'll set this below.)
@@ -1717,19 +1804,38 @@ class MultiClockApp(tk.Tk):
             self._schedule_next_autosave()
 
     def _on_close(self):
-        """Final best-effort save, stop autosave, then close app."""
+        """Final best-effort save, store window position, stop autosave, then close app."""
         try:
+            # Save session
             target = self.current_session_path or DEFAULT_SESSION_PATH
             self._save_to_path(Path(target))
         except Exception:
             pass
         finally:
+            # Capture window size + center point in virtual screen coords
+            try:
+                self.update_idletasks()
+                geom = self.geometry()  # e.g., "900x650+123+456"
+                size, x, y = geom.split("+", 2)
+                w, h = map(int, size.split("x"))
+                x, y = int(x), int(y)
+                cx = x + (w // 2)
+                cy = y + (h // 2)
+
+                self.settings["last_window_size"] = [w, h]
+                self.settings["last_window_center"] = [cx, cy]
+                save_settings(self.settings)
+            except Exception:
+                pass
+
+            # Stop autosave
             if self._autosave_job:
                 try:
                     self.after_cancel(self._autosave_job)
                 except Exception:
                     pass
                 self._autosave_job = None
+
             self.destroy()
 
     # ---------- Menu ----------
