@@ -262,16 +262,10 @@ class DangerClockFrame(ClockBase):
         # OPTIONAL: live-update on each keystroke as well
         title_entry.bind("<KeyRelease>", lambda e: self.draw())
 
-        # --- Title controls (per-clock editable name) ---
-        ttk.Label(self, text="Clock Name:").grid(row=0, column=0, padx=6, pady=(8, 0), sticky="w")
-        title_entry = ttk.Entry(self, textvariable=self.title_var, width=20, justify="left")
-        title_entry.grid(row=0, column=1, padx=(0, 12), pady=(8, 0), sticky="w")
-
         # --- Segments: allow a shared IntVar (used by Racing container later) ---
         self._uses_shared_segments = shared_segments_var is not None
         self.segments = shared_segments_var or tk.IntVar(value=int(segments))
         self._seg_trace_id = None
-
 
         if not self._uses_shared_segments:
             ttk.Label(self, text="Segments:").grid(row=0, column=6, sticky="e", padx=6, pady=(8, 0))
@@ -361,6 +355,11 @@ class DangerClockFrame(ClockBase):
 
     def is_complete(self) -> bool:
         return sum(self.filled) >= int(self.segments.get())
+
+    def last_filled_index(self) -> int | None:
+        """Return the highest index currently filled, or None if none."""
+        n = sum(self.filled)
+        return (n - 1) if n > 0 else None
 
     def destroy(self):
         # detach shared segments trace if any, then let base remove its trace, then destroy
@@ -603,15 +602,17 @@ class DangerClockFrame(ClockBase):
                     justify="center",
                 )
         overlay = getattr(self, "_overlay_text", None)
+        overlay_color = getattr(self, "_overlay_color", "#000000")
         if overlay:
             try:
-                # scale font to dial
                 r = getattr(self, "radius", 60)
                 size = max(12, int(r * 0.28))
-                self.canvas.create_text(self.center_x, self.center_y,
-                                        text=overlay, font=("Consolas", size, "bold"),
-                                        fill=_contrast_text_color(self.fill_color) if not self.inverted.get()
-                                        else "#FFFFFF")
+                self.canvas.create_text(
+                    self.center_x, self.center_y,
+                    text=overlay,
+                    font=("Consolas", size, "bold"),
+                    fill=overlay_color
+                )
             except Exception:
                 pass
 
@@ -1002,42 +1003,65 @@ class LinkedClocksFrame(ttk.Frame):
         self.notes = notes or ""
 
         self._show_overlay = tk.BooleanVar(value=True)
+        self.overlay_color = tk.StringVar(value="#000000")  # default black; flips in dark mode
 
         # Timer engine state
         self._is_running = False
         self._is_paused = False
         self._job = None
 
-        # --- Top bar ---
-        top = ttk.Frame(self); top.pack(fill="x", padx=8, pady=(8,0))
-        ttk.Label(top, text="Tab Title:").pack(side="left")
-        ttk.Entry(top, textvariable=self.title_var, width=28, justify="center").pack(side="left", padx=(6, 12))
+        # --- Top bar (2-row grid to avoid clipping) ---
+        top = ttk.Frame(self);
+        top.pack(fill="x", padx=8, pady=(8, 0))
+        for c in range(8): top.columnconfigure(c, weight=1)
+        top.grid_rowconfigure(1, minsize=36)  # ensure row 2 has height
 
-        ttk.Label(top, text="Segments:").pack(side="left", padx=(0,4))
+        # Row 0: title / segments / dark / notes
+        ttk.Label(top, text="Tab Title:").grid(row=0, column=0, sticky="w", padx=(0, 6))
+        ttk.Entry(top, textvariable=self.title_var, width=28, justify="center").grid(row=0, column=1, sticky="we",
+                                                                                     padx=(6, 12))
+
+        ttk.Label(top, text="Segments:").grid(row=0, column=2, sticky="e", padx=(0, 6))
         seg_box = ttk.Combobox(top, state="readonly", values=SEGMENT_CHOICES, width=6, textvariable=self.segments_var)
-        seg_box.pack(side="left")
+        seg_box.grid(row=0, column=3, sticky="w")
         seg_box.bind("<<ComboboxSelected>>", lambda e: self._on_segments_changed())
 
-        inv = ttk.Checkbutton(top, text="Dark Mode", variable=self.inverted_var, command=self._on_theme_changed_all)
-        inv.pack(side="left", padx=(12, 4))
+        ttk.Checkbutton(top, text="Dark Mode", variable=self.inverted_var, command=self._on_theme_changed_all) \
+            .grid(row=0, column=4, sticky="w", padx=(12, 4))
 
-        ttk.Button(top, text="Notes", command=self.open_notes).pack(side="left", padx=(6, 12))
+        ttk.Button(top, text="Notes", command=self.open_notes).grid(row=0, column=5, sticky="w", padx=(6, 12))
 
-        ttk.Button(top, text="Add Dial", command=self._add_dial).pack(side="left", padx=(0, 6))
-        ttk.Button(top, text="Remove Dial", command=self._remove_dial).pack(side="left", padx=(0, 12))
-
-        ttk.Button(top, text="Reset All", command=self.reset_all).pack(side="left", padx=(0, 12))
+        # Row 1: add/remove/reset/overlay + (Commit C) overlay color + master controls at right
+        ttk.Button(top, text="Add Dial", command=self._add_dial).grid(row=1, column=0, sticky="w", padx=(0, 6))
+        ttk.Button(top, text="Remove Dial", command=self._remove_dial).grid(row=1, column=1, sticky="w", padx=(0, 12))
+        ttk.Button(top, text="Reset All", command=self.reset_all).grid(row=1, column=2, sticky="w", padx=(0, 12))
 
         ttk.Checkbutton(top, text="Show Countdown Overlay", variable=self._show_overlay,
-                        command=self._redraw_overlays).pack(side="left")
+                        command=self._redraw_overlays).grid(row=1, column=3, sticky="w", padx=(0, 12))
 
-        # Master controls (right side)
-        right = ttk.Frame(top); right.pack(side="right")
-        self.start_btn = ttk.Button(right, text="Start", command=self.start)
+        def _choose_overlay_color():
+            (rgb, hexv) = colorchooser.askcolor(
+                color=self.overlay_color.get(),
+                title="Choose overlay text color",
+                parent=self.winfo_toplevel()
+            )
+            if hexv:
+                self.overlay_color.set(hexv)
+                self._redraw_overlays()
+
+        ttk.Button(top, text="Overlay Color", command=_choose_overlay_color) \
+            .grid(row=1, column=4, sticky="w", padx=(0, 12))
+
+        # (Commit C will insert an "Overlay Color" button into column 4 here)
+
+        # Master controls aligned right
+        right = ttk.Frame(top);
+        right.grid(row=1, column=7, sticky="e")
+        self.start_btn = ttk.Button(right, text="Start", command=self.start);
         self.start_btn.pack(side="left", padx=4)
-        self.pause_btn = ttk.Button(right, text="Pause", command=self.pause, state="disabled")
+        self.pause_btn = ttk.Button(right, text="Pause", command=self.pause, state="disabled");
         self.pause_btn.pack(side="left", padx=4)
-        self.stop_btn = ttk.Button(right, text="Stop", command=self.stop, state="disabled")
+        self.stop_btn = ttk.Button(right, text="Stop", command=self.stop, state="disabled");
         self.stop_btn.pack(side="left", padx=4)
 
         # --- Dial grid ---
@@ -1059,6 +1083,8 @@ class LinkedClocksFrame(ttk.Frame):
 
         self._validate_start_button()
         self._redraw_overlays()
+        self._bind_serial_clicks()
+
 
     # ------------- Public-ish actions -------------
     def open_notes(self):
@@ -1072,6 +1098,7 @@ class LinkedClocksFrame(ttk.Frame):
         self._reset_all_remaining()
         self._redraw_overlays()
         self._validate_start_button()
+        self._bind_serial_clicks()
 
     def start(self):
         if not self._validate_timers(): return
@@ -1112,17 +1139,20 @@ class LinkedClocksFrame(ttk.Frame):
     def _on_tick(self):
         if not self._is_running or self._is_paused:
             return
+
         # find active dial (first incomplete)
-        idx = next((i for i,d in enumerate(self.dials) if not d.is_complete()), None)
+        idx = next((i for i, d in enumerate(self.dials) if not d.is_complete()), None)
         if idx is None:
             self.stop()
             self._redraw_overlays()
+            self._bind_serial_clicks()  # <-- NEW
             return
 
         # If timers are not used, do nothing (user advances by clicks)
         if not self._timers_in_use():
-            self._schedule_tick()
             self._redraw_overlays()
+            self._bind_serial_clicks()  # <-- NEW
+            self._schedule_tick()
             return
 
         # decrement remaining
@@ -1133,6 +1163,7 @@ class LinkedClocksFrame(ttk.Frame):
             self.remaining[idx] = self.timer_secs[idx].get() * 1000
 
         self._redraw_overlays()
+        self._bind_serial_clicks()  # <-- NEW
         self._schedule_tick()
 
     def _timers_in_use(self) -> bool:
@@ -1171,13 +1202,45 @@ class LinkedClocksFrame(ttk.Frame):
             if show and timers:
                 ms = self.remaining[i]
                 s = max(0, int(ms / 1000))
-                mm, ss = divmod(s, 60)
-                text = f"{mm:02d}:{ss:02d}"
-                # fade the overlay for inactive dials (optional)
-                if active is not None and i != active:
-                    text = text  # keep same text; visual dimming is tricky without colors—skip
+                h, rem = divmod(s, 3600)
+                m, s = divmod(rem, 60)
+                text = f"{h:02d}:{m:02d}:{s:02d}"
             d._overlay_text = text
+            d._overlay_color = self.overlay_color.get()  # NEW: pass color to dial
             d.draw()
+
+    def _active_index(self) -> int | None:
+        return next((i for i, d in enumerate(self.dials) if not d.is_complete()), None)
+
+    def _bind_serial_clicks(self):
+        """Only the active dial gets clicks. Left=advance. Right=unfill (only when timers are NOT used)."""
+        active = self._active_index()
+        timers = self._timers_in_use()
+
+        for i, d in enumerate(self.dials):
+            # clear our binds
+            for seq in ("<Button-1>", "<Button-3>"):
+                try:
+                    d.canvas.unbind(seq)
+                except Exception:
+                    pass
+
+            if active is None:
+                continue  # everything complete
+
+            if i == active:
+                # left click always advances one
+                d.canvas.bind("<Button-1>",
+                              lambda e, di=d: (di.increase(), self._redraw_overlays(), self._bind_serial_clicks()))
+                # right click: only in manual mode (no timers anywhere)
+                if not timers:
+                    def _unfill(_e, di=d):
+                        # Use the public API so any future side‑effects stay consistent
+                        di.decrease()
+                        self._redraw_overlays()
+                        self._bind_serial_clicks()
+
+                    d.canvas.bind("<Button-3>", _unfill)
 
     # ------------- Layout / building -------------
 
@@ -1200,7 +1263,7 @@ class LinkedClocksFrame(ttk.Frame):
         ctrl = ttk.Frame(dial); ctrl.grid(row=3, column=0, columnspan=8, sticky="we", pady=(0,6))
         ttk.Label(ctrl, text="Countdown (mm:ss):").pack(side="left")
         var = tk.IntVar(value=0)  # store seconds
-        ent = ttk.Entry(ctrl, width=8, justify="center")
+        ent = ttk.Entry(ctrl, width=10, justify="center")
         ent.pack(side="left", padx=(4, 8))
 
         def parse_and_set(*_):
@@ -1209,11 +1272,15 @@ class LinkedClocksFrame(ttk.Frame):
                 var.set(0)
             else:
                 try:
-                    if ":" in txt:
-                        mm, ss = txt.split(":", 1)
-                        total = int(mm)*60 + int(ss)
+                    parts = txt.split(":")
+                    if len(parts) == 1:
+                        total = int(parts[0])
+                    elif len(parts) == 2:
+                        mm, ss = parts
+                        total = int(mm) * 60 + int(ss)
                     else:
-                        total = int(txt)  # seconds only
+                        hh, mm, ss = parts[-3], parts[-2], parts[-1]
+                        total = int(hh) * 3600 + int(mm) * 60 + int(ss)
                     var.set(max(0, total))
                 except Exception:
                     # keep old; lightly notify?
@@ -1222,7 +1289,7 @@ class LinkedClocksFrame(ttk.Frame):
             self._validate_start_button()
             self._redraw_overlays()
 
-        ent.insert(0, "00:00")
+        ent.insert(0, "00:00:00")
         ent.bind("<FocusOut>", parse_and_set)
         ent.bind("<Return>", parse_and_set)
 
@@ -1233,6 +1300,7 @@ class LinkedClocksFrame(ttk.Frame):
         self.remaining.append(0)
 
         self._relayout()
+        self._bind_serial_clicks()
 
     def _remove_dial(self):
         if len(self.dials) <= 2: return
@@ -1244,6 +1312,7 @@ class LinkedClocksFrame(ttk.Frame):
         self._relayout()
         self._validate_start_button()
         self._redraw_overlays()
+        self._bind_serial_clicks()
 
     def _relayout(self):
         for w in self.dials: w.grid_forget()
@@ -1253,9 +1322,18 @@ class LinkedClocksFrame(ttk.Frame):
 
     def _on_segments_changed(self):
         for d in self.dials: d._clamp_and_draw()
+        self._bind_serial_clicks()
 
     def _on_theme_changed_all(self):
         for d in self.dials: d._on_theme_changed()
+        # Flip default overlay text color when theme changes (only if user hasn't picked a custom one)
+        if self.inverted_var.get():
+            if self.overlay_color.get().lower() in ("#000000", "black"):
+                self.overlay_color.set("#FFFFFF")
+        else:
+            if self.overlay_color.get().lower() in ("#ffffff", "white"):
+                self.overlay_color.set("#000000")
+
         self._redraw_overlays()
 
     # ------------- Persistence -------------
@@ -1307,6 +1385,7 @@ class LinkedClocksFrame(ttk.Frame):
         self._reset_all_remaining()
         self._redraw_overlays()
         self._validate_start_button()
+        self._bind_serial_clicks()
 
     def destroy(self):
         self._cancel_tick()
