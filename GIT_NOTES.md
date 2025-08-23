@@ -15,7 +15,6 @@ git push
 See a quick list of your commits:
 git log --oneline
 
-
 ## Roll back to a previous version
 *Careful with this — ask ChatGPT if unsure!*
 git checkout <commit_id>
