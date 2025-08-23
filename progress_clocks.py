@@ -485,8 +485,6 @@ class DangerClockFrame(ClockBase):
             self.after(50, self.draw)
             return
 
-        c.delete("all")
-        c.delete("all")
         c = self.canvas
         c.delete("all")
         colors = self._colors()
@@ -984,7 +982,7 @@ class LinkedClocksFrame(ttk.Frame):
     """
     Linked series of 2..6 circular dials.
     - Only the first incomplete dial is "active".
-    - Master Start/Pause/Stop drive a per-dial countdown (if timers are set).
+    - Master Start/Stop drive a per-dial countdown (if timers are set).
     - Clicking a dial fills the NEXT segment (no arbitrary segment picking).
     - If ANY timer is specified, ALL timers must be specified to Start.
     """
@@ -1007,7 +1005,6 @@ class LinkedClocksFrame(ttk.Frame):
 
         # Timer engine state
         self._is_running = False
-        self._is_paused = False
         self._job = None
 
         # --- Top bar (2-row grid to avoid clipping) ---
@@ -1059,10 +1056,11 @@ class LinkedClocksFrame(ttk.Frame):
         right.grid(row=1, column=7, sticky="e")
         self.start_btn = ttk.Button(right, text="Start", command=self.start);
         self.start_btn.pack(side="left", padx=4)
-        self.pause_btn = ttk.Button(right, text="Pause", command=self.pause, state="disabled");
-        self.pause_btn.pack(side="left", padx=4)
         self.stop_btn = ttk.Button(right, text="Stop", command=self.stop, state="disabled");
         self.stop_btn.pack(side="left", padx=4)
+        # Inline hint shown when Start is disabled due to partial timers
+        self._start_hint = ttk.Label(right, text="Enter all HH:MM:SS to enable Start", foreground="#a00")
+        self._start_hint.pack_forget()
 
         # --- Dial grid ---
         self.dials_frame = ttk.Frame(self); self.dials_frame.pack(fill="both", expand=True, padx=8, pady=8)
@@ -1101,30 +1099,30 @@ class LinkedClocksFrame(ttk.Frame):
         self._bind_serial_clicks()
 
     def start(self):
-        if not self._validate_timers(): return
-        if all(d.is_complete() for d in self.dials): return  # nothing to do
-        self._is_running, self._is_paused = True, False
-        self._schedule_tick()
-        self._sync_master_buttons()
+        # Validate timers (guard against partial entries)
+        if not self._validate_timers():
+            return
 
-    def pause(self):
-        if not self._is_running: return
-        self._is_paused = True
-        self._cancel_tick()
+        # If all dials complete, nothing to do
+        if all(d.is_complete() for d in self.dials):
+            return
+
+        # Start or resume
+        self._is_running = True
+        self._schedule_tick()
         self._sync_master_buttons()
 
     def stop(self):
         self._is_running = False
-        self._is_paused = False
         self._cancel_tick()
         self._sync_master_buttons()
 
     # ------------- Internal helpers -------------
 
     def _sync_master_buttons(self):
+        # Start is enabled only when not running (it also acts as resume)
         self.start_btn.configure(state="normal" if not self._is_running else "disabled")
-        self.pause_btn.configure(state="normal" if self._is_running and not self._is_paused else "disabled")
-        self.stop_btn.configure(state="normal" if self._is_running or self._is_paused else "disabled")
+        self.stop_btn.configure(state="normal" if self._is_running else "disabled")
 
     def _schedule_tick(self):
         self._cancel_tick()
@@ -1137,8 +1135,9 @@ class LinkedClocksFrame(ttk.Frame):
             self._job = None
 
     def _on_tick(self):
-        if not self._is_running or self._is_paused:
+        if not self._is_running:
             return
+        ...
 
         # find active dial (first incomplete)
         idx = next((i for i, d in enumerate(self.dials) if not d.is_complete()), None)
@@ -1179,15 +1178,23 @@ class LinkedClocksFrame(ttk.Frame):
         if all(v > 0 for v in vals):
             return True
         messagebox.showerror("Timers incomplete",
-                             "You’ve enabled timers on some clocks.\nPlease enter a countdown for ALL clocks (mm:ss).",
+                             "You’ve enabled timers on some clocks.\nPlease enter a countdown for ALL clocks (HH:MM:SS).",
                              parent=self.winfo_toplevel())
         return False
 
     def _validate_start_button(self):
-        can_start = True
-        if self._timers_in_use():
-            can_start = all(v.get() > 0 for v in self.timer_secs)
-        self.start_btn.configure(state="normal" if can_start else "disabled")
+        timers = [v.get() for v in self.timer_secs]
+        any_set = any(t > 0 for t in timers)
+        all_set = all(t > 0 for t in timers) if timers else False
+        can_start = (not any_set) or (all_set)
+        self.start_btn.configure(state="normal" if can_start and not self._is_running else "disabled")
+
+        # Toggle the inline hint if it exists (created in D2)
+        if hasattr(self, "_start_hint"):
+            if can_start:
+                self._start_hint.pack_forget()
+            else:
+                self._start_hint.pack(side="left", padx=(0, 8))
 
     def _reset_all_remaining(self):
         self.remaining = [v.get() * 1000 for v in self.timer_secs]
@@ -1261,7 +1268,7 @@ class LinkedClocksFrame(ttk.Frame):
 
         # Per-dial timer UI under each dial
         ctrl = ttk.Frame(dial); ctrl.grid(row=3, column=0, columnspan=8, sticky="we", pady=(0,6))
-        ttk.Label(ctrl, text="Countdown (mm:ss):").pack(side="left")
+        ttk.Label(ctrl, text="Countdown (HH:MM:SS):").pack(side="left")
         var = tk.IntVar(value=0)  # store seconds
         ent = ttk.Entry(ctrl, width=10, justify="center")
         ent.pack(side="left", padx=(4, 8))
