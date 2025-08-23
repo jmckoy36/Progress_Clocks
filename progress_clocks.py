@@ -356,10 +356,16 @@ class DangerClockFrame(ClockBase):
                  shared_segments_var=None, shared_inverted_var=None,
                  # NEW:
                  enable_label_ui=True,
-                 click_mode="normal"   # "normal" (pick segment), "serial_next" (always next), "disabled"
+                 click_mode="normal",  # "normal" (pick segment), "serial_next" (always next), "disabled"
+                 linked_parent=None,  # when embedded in LinkedClocksFrame
+                 show_settings_button=True  # allow caller (e.g., Racing) to hide per‑dial Settings
                  ):
+
         super().__init__(master, initial_title=initial_title, inverted=inverted, notes=notes,
                          shared_inverted_var=shared_inverted_var)
+
+        # If embedded inside LinkedClocksFrame, keep a backref so Reset can talk to timers.
+        self._linked_parent = linked_parent
 
         # --- Title controls (per-clock editable name) ---
         ttk.Label(self, text="Clock Name:").grid(row=0, column=0, padx=6, pady=(8, 0), sticky="w")
@@ -370,8 +376,13 @@ class DangerClockFrame(ClockBase):
         # OPTIONAL: live-update on each keystroke as well
         title_entry.bind("<KeyRelease>", lambda e: self.draw())
         # Settings button on the top bar
-        ttk.Button(self, text="Settings", command=self.open_settings).grid(row=0, column=4, padx=(6, 6), pady=(8, 0),
-                                                                           sticky="w")
+        # Hide when embedded in Linked Clocks (they have a single tab Settings)
+        # or when the caller (e.g., Racing) requests no per‑dial Settings.
+        if show_settings_button and (linked_parent is None):
+            ttk.Button(self, text="Settings", command=self.open_settings).grid(
+                row=0, column=4, padx=(6, 6), pady=(8, 0), sticky="w"
+            )
+
         # --- Segments: allow a shared IntVar (used by Racing container later) ---
         self._uses_shared_segments = shared_segments_var is not None
         self.segments = shared_segments_var or tk.IntVar(value=int(segments))
@@ -608,14 +619,45 @@ class DangerClockFrame(ClockBase):
         self.draw()
 
     def reset_with_prompt(self):
-        """Ask whether to also clear labels when resetting this single clock."""
+        """
+        Reset this single clock.
+        - If used inside Linked Clocks, offer to reset its timer (no label text there).
+        - Otherwise, offer to clear labels (classic Danger/Racing behavior).
+        """
+        if getattr(self, "_linked_parent", None) is not None:
+            # Linked Clocks: no labels; also restore default fill color.
+            ans = messagebox.askquestion(
+                "Reset Clock",
+                "Resetting this clock will clear all filled segments and reset Fill Color to default.\n\n"
+                "Also reset this clock’s timer to 00:00:00?",
+                icon="question",
+                parent=self.winfo_toplevel()
+            )
+
+            # Always restore fill color to the theme default
+            self.fill_color = "#FFFFFF" if self.inverted.get() else "#000000"
+            try:
+                self.fill_preview.configure(bg=self.fill_color)
+            except Exception:
+                pass
+
+            if ans == "yes":
+                try:
+                    self._linked_parent._reset_timer_for(self)
+                except Exception:
+                    pass
+
+            self.reset()
+            return
+
+
+        # Non-linked (Danger/Racing) original behavior: ask about labels
         ans = messagebox.askquestion(
             "Reset Clock",
             "Reset this clock?\n\nAlso clear segment labels?",
             icon="question",
             parent=self.winfo_toplevel()
         )
-        # 'yes' means also clear labels; 'no' means leave labels
         if ans == "yes":
             self.labels = [""] * int(self.segments.get())
             self.show_labels.set(self.show_labels.get())  # keep toggle state
@@ -1100,11 +1142,12 @@ class RacingClocksFrame(ttk.Frame):
             return
         dial = DangerClockFrame(
             self.dials_frame,
-            initial_title=f"Clock {len(self.dials)+1}",
+            initial_title=f"Clock {len(self.dials) + 1}",
             segments=self.segments_var.get(),
             inverted=self.inverted_var.get(),
             shared_segments_var=self.segments_var,
             shared_inverted_var=self.inverted_var,
+            show_settings_button=False,  # hide per‑dial Settings in Racing
         )
         self.dials.append(dial)
         self._relayout()
@@ -1236,21 +1279,34 @@ class LinkedClocksFrame(ttk.Frame):
         self._is_running = False
         self._job = None
 
+        # --- Use grid on this frame so the dial area can expand properly ---
+        self.columnconfigure(0, weight=1)  # the single column of this frame grows
+        self.rowconfigure(1, weight=1)  # row 1 (the dial grid) takes remaining space
+
         # --- Top bar (2-row grid to avoid clipping) ---
         top = ttk.Frame(self)
-        top.pack(fill="x", padx=8, pady=(8, 0))
+        top.grid(row=0, column=0, sticky="we", padx=8, pady=(8, 0))
+
+        # Let only certain columns expand; keep the far-right columns fixed so buttons don’t get clipped
         for c in range(8):
-            top.columnconfigure(c, weight=1)
+            top.grid_columnconfigure(c, weight=0)
+        # Make inputs and mid columns flexible
+        top.grid_columnconfigure(1, weight=1)  # title entry grows
+        top.grid_columnconfigure(3, weight=1)  # segments area can flex a bit
+        top.grid_columnconfigure(5, weight=1)  # spacer before master controls
+
         # Make row 1 a bit taller; prevent control clipping
         top.grid_rowconfigure(1, minsize=44)
 
-        # Give some columns minimum width so text like "Dark Mode" and buttons don't truncate
-        top.grid_columnconfigure(0, minsize=90)  # "Tab Title:" label
-        top.grid_columnconfigure(1, minsize=160)  # title entry
-        top.grid_columnconfigure(2, minsize=90)  # "Segments:" label
-        top.grid_columnconfigure(3, minsize=110)  # segments combobox / overlay cb
-        top.grid_columnconfigure(4, minsize=110)  # "Dark Mode" / "Overlay Color"
-        top.grid_columnconfigure(5, minsize=90)  # "Notes" / "Beep on dial complete"
+        # Minimum widths so text/buttons don’t truncate
+        top.grid_columnconfigure(0, minsize=90)  # "Tab Title:"
+        top.grid_columnconfigure(1, minsize=150)  # title entry (slightly smaller to free space)
+        top.grid_columnconfigure(2, minsize=90)  # "Segments:"
+        top.grid_columnconfigure(3, minsize=110)  # segments combobox
+        top.grid_columnconfigure(4, minsize=110)  # "Overlay Color"
+        top.grid_columnconfigure(5, minsize=90)  # spacer before buttons (this column expands)
+        top.grid_columnconfigure(6, minsize=8)  # tiny gutter
+        top.grid_columnconfigure(7, minsize=12)  # tiny right margin
 
         # Row 0: title / segments / dark / notes
         ttk.Label(top, text="Tab Title:").grid(row=0, column=0, sticky="w", padx=(0, 6))
@@ -1263,7 +1319,7 @@ class LinkedClocksFrame(ttk.Frame):
         seg_box.bind("<<ComboboxSelected>>", lambda e: self._on_segments_changed())
 
         ttk.Button(top, text="Notes", command=self.open_notes).grid(row=0, column=5, sticky="w", padx=(6, 12))
-        ttk.Button(top, text="Settings", command=self.open_settings).grid(row=0, column=6, sticky="w", padx=(0, 6))
+        ttk.Button(top, text="Settings", command=self.open_settings).grid(row=0, column=5, sticky="e", padx=(0, 6))
 
         # Row 1: add/remove/reset/overlay + (Commit C) overlay color + master controls at right
         ttk.Button(top, text="Add Dial", command=self._add_dial).grid(row=1, column=0, sticky="w", padx=(0, 6))
@@ -1287,20 +1343,27 @@ class LinkedClocksFrame(ttk.Frame):
         # (Commit C will insert an "Overlay Color" button into column 4 here)
 
         # Master controls aligned right
-        right = ttk.Frame(top);
-        right.grid(row=1, column=7, sticky="e")
-        self.start_btn = ttk.Button(right, text="Start", command=self.start);
+        right = ttk.Frame(top)
+        # Place master controls in the flexible spacer column and let col 6/7 be tiny gutters
+        right.grid(row=1, column=5, sticky="e", padx=(0, 8))
+        self.start_btn = ttk.Button(right, text="Start", command=self.start)
         self.start_btn.pack(side="left", padx=4)
-        self.stop_btn = ttk.Button(right, text="Stop", command=self.stop, state="disabled");
+        self.stop_btn = ttk.Button(right, text="Stop", command=self.stop, state="disabled")
         self.stop_btn.pack(side="left", padx=4)
+
         # Inline hint shown when Start is disabled due to partial timers
         self._start_hint = ttk.Label(right, text="Enter all HH:MM:SS to enable Start", foreground="#a00")
         self._start_hint.pack_forget()
 
         # --- Dial grid ---
-        self.dials_frame = ttk.Frame(self); self.dials_frame.pack(fill="both", expand=True, padx=8, pady=8)
-        for c in range(3): self.dials_frame.columnconfigure(c, weight=1)
-        for r in range(2): self.dials_frame.rowconfigure(r, weight=1)
+        self.dials_frame = ttk.Frame(self)
+        self.dials_frame.grid(row=1, column=0, sticky="nsew", padx=8, pady=8)
+
+        for c in range(3):
+            self.dials_frame.columnconfigure(c, weight=1)
+        for r in range(2):
+            self.dials_frame.rowconfigure(r, weight=1)
+
         self.dials_frame.bind("<Configure>", lambda e: self._relayout())
 
         self.dials: list[DangerClockFrame] = []
@@ -1328,27 +1391,32 @@ class LinkedClocksFrame(ttk.Frame):
     def reset_all(self):
         self.stop()
 
-        # Ask about clearing labels
+        # Linked Clocks have no segment labels; ask only about timers.
         ans = messagebox.askquestion(
             "Reset All",
-            "Reset all clocks on this tab?\n\nAlso clear ALL segment labels and timers?",
+            "Reset all clocks on this tab (clears all filled segments and resets Fill Color to default).\n\n"
+            "Also reset ALL timers to 00:00:00?",
             icon="question",
             parent=self.winfo_toplevel()
         )
-        clear_labels_and_timers = (ans == "yes")
+        reset_timers = (ans == "yes")
 
+        # Clear fills and restore default fill color on every dial
         for d in self.dials:
-            if clear_labels_and_timers:
-                d.labels = [""] * int(d.segments.get())
+            d.fill_color = "#FFFFFF" if d.inverted.get() else "#000000"
+            try:
+                d.fill_preview.configure(bg=d.fill_color)
+            except Exception:
+                pass
             d.reset()
 
-        if clear_labels_and_timers:
-            # Timers back to 00:00:00 for all
-            for v in self.timer_secs:
-                v.set(0)
-            # Also zero out elapsed so overlays show 00:00:00
-            self.elapsed_ms = [0 for _ in self.dials]
 
+        # Optionally zero all timers (and their entry text)
+        if reset_timers:
+            for i in range(len(self.dials)):
+                self._reset_timer_by_index(i)
+
+        # Always reset elapsed for proportional overlays
         self._reset_all_remaining()
         self._redraw_overlays()
         self._validate_start_button()
@@ -1471,6 +1539,38 @@ class LinkedClocksFrame(ttk.Frame):
             else:
                 self._start_hint.pack(side="left", padx=(0, 8))
 
+    def _reset_timer_for(self, dial: DangerClockFrame):
+        """Reset a single dial’s timer to 00:00:00 and zero its elapsed ms; update entry text."""
+        try:
+            i = self.dials.index(dial)
+        except ValueError:
+            return
+        self._reset_timer_by_index(i)
+
+    def _reset_timer_by_index(self, i: int):
+        """Helper: zero timer IntVar/elapsed and refresh its entry text/overlays."""
+        if i < 0 or i >= len(self.dials):
+            return
+        try:
+            self.timer_secs[i].set(0)
+        except Exception:
+            pass
+        try:
+            self.elapsed_ms[i] = 0
+        except Exception:
+            pass
+        # Update visible entry text to "00:00:00" if we have it
+        try:
+            ent = getattr(self.dials[i], "_timer_entry", None)
+            if ent and ent.winfo_exists():
+                ent.delete(0, "end")
+                ent.insert(0, "00:00:00")
+        except Exception:
+            pass
+        # Refresh UI bits impacted by timer state
+        self._redraw_overlays()
+        self._validate_start_button()
+
     def _reset_all_remaining(self):
         # Proportional timing uses elapsed; remaining is derived
         self.elapsed_ms = [0 for _ in self.dials]  # NEW
@@ -1545,13 +1645,14 @@ class LinkedClocksFrame(ttk.Frame):
         idx = len(self.dials)
         dial = DangerClockFrame(
             self.dials_frame,
-            initial_title=f"Clock {idx+1}",
+            initial_title=f"Clock {idx + 1}",
             segments=self.segments_var.get(),
             inverted=self.inverted_var.get(),
             shared_segments_var=self.segments_var,
             shared_inverted_var=self.inverted_var,
-            enable_label_ui=False,     # per spec: no objective labels
+            enable_label_ui=False,  # per spec: no objective labels
             click_mode="serial_next",  # per spec: click anywhere => fill next segment
+            linked_parent=self  # let the dial ask us to reset its timer
         )
 
         # Per-dial timer UI under each dial
@@ -1560,6 +1661,8 @@ class LinkedClocksFrame(ttk.Frame):
         var = tk.IntVar(value=0)  # store seconds
         ent = ttk.Entry(ctrl, width=10, justify="center")
         ent.pack(side="left", padx=(4, 8))
+        # Keep a handle so we can rewrite the text when timers are reset
+        dial._timer_entry = ent
         ttk.Label(ctrl, text="ⓘ fills segments evenly over total time", foreground="#666") \
             .pack(side="left", padx=(8, 0))
 
@@ -1621,29 +1724,36 @@ class LinkedClocksFrame(ttk.Frame):
             w = max(1, int(self.dials_frame.winfo_width()))
         except Exception:
             w = 900
-        # Simple breakpoints; tweak as you like
-        if w < 760:
+
+        # Breakpoints tuned for your controls so things don’t squeeze/clamp
+        if w < 720:
             cols = 1
-        elif w < 1100:
+        elif w < 1080:
             cols = 2
         else:
             cols = 3
 
-        # Configure grid
+        # Reset grid weights
         for c in range(3):
             self.dials_frame.columnconfigure(c, weight=0)
-        for r in range(2):
-            self.dials_frame.rowconfigure(r, weight=0)
+        # Clear previous row weights (set a couple extra rows just in case)
+        for r in range(4):
+            self.dials_frame.rowconfigure(r, weight=0, minsize=0)
 
+        # Apply new weights
         for c in range(cols):
             self.dials_frame.columnconfigure(c, weight=1)
-        rows = (len(self.dials) + cols - 1) // cols
+
+        rows = max(1, (len(self.dials) + cols - 1) // cols)
+        # Give each row a reasonable minimum height so the dials can fully show
+        min_row_h = 260  # adjust if you want the dials bigger/smaller at tight heights
         for r in range(rows):
-            self.dials_frame.rowconfigure(r, weight=1)
+            self.dials_frame.rowconfigure(r, weight=1, minsize=min_row_h)
 
         # Place widgets
         for wgt in self.dials:
             wgt.grid_forget()
+
         for i, wgt in enumerate(self.dials):
             r, c = divmod(i, cols)
             wgt.grid(row=r, column=c, sticky="nsew", padx=6, pady=6)
