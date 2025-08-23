@@ -1048,6 +1048,9 @@ class LinkedClocksFrame(ttk.Frame):
 
         ttk.Button(top, text="Overlay Color", command=_choose_overlay_color) \
             .grid(row=1, column=4, sticky="w", padx=(0, 12))
+        self.beep_on_complete = tk.BooleanVar(value=True)
+        ttk.Checkbutton(top, text="Beep on dial complete", variable=self.beep_on_complete) \
+            .grid(row=1, column=5, sticky="w", padx=(0, 12))
 
         # (Commit C will insert an "Overlay Color" button into column 4 here)
 
@@ -1177,7 +1180,8 @@ class LinkedClocksFrame(ttk.Frame):
         if self.elapsed_ms[idx] >= total_ms:
             self.dials[idx]._set_fill_count(segs)
             self.dials[idx].draw()
-            # (Commit G: optional beep goes here)
+            if getattr(self, "beep_on_complete", None) and self.beep_on_complete.get():
+                self._beep_triplet()
 
         self._redraw_overlays()
         self._bind_serial_clicks()  # <-- NEW
@@ -1352,6 +1356,16 @@ class LinkedClocksFrame(ttk.Frame):
         for i,w in enumerate(self.dials):
             r,c = divmod(i,3)
             w.grid(row=r, column=c, sticky="nsew", padx=6, pady=6)
+
+    def _beep_triplet(self):
+        """Play three quick beeps when a dial completes."""
+        root = self.winfo_toplevel()
+        try:
+            root.bell()
+            root.after(150, root.bell)
+            root.after(300, root.bell)
+        except Exception:
+            pass
 
     def _on_segments_changed(self):
         for d in self.dials: d._clamp_and_draw()
