@@ -26,6 +26,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Inline note** under per-dial timer entries: “ⓘ fills segments evenly over total time.”
 
 ### Changed
+- **Edit Segment Labels** now shows Segment numbers starting at **1** instead of 0 for clarity.
+- **Edit Labels dialog** auto-sizes to fit all segment entries and centers over the app window.
 - **Linked Clocks timing behavior**: countdowns now fill segments proportionally across the total time (e.g., 4 segments over 4 minutes = 1 per minute).
 - **Overlay display** now shows `HH:MM:SS` remaining instead of per-cycle resets.
 - **Pause button removed**: Start now resumes if stopped; Stop halts all timers.
@@ -34,6 +36,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **UI wording updated**: “Beep on dial complete” renamed to **“Enable Timer Alarms”** for clearer language.
 
 ### Fixed
+- **Racing Clocks**: Reset All now prompts the user whether to also clear segment labels.
+- **Danger & Racing Clocks**: Double-clicking a segment now opens the label editor without also filling the segment.
 - **UI clipping issues** when window not maximized:
   - Dark Mode label truncation.
   - Overlay/Beep checkboxes cut off.
