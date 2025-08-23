@@ -3,7 +3,7 @@
 Progress Clocks Application
 """
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 
 import json
@@ -401,6 +401,9 @@ class DangerClockFrame(ClockBase):
         # default fill color: black in Light Mode, white in Dark Mode, unless a color was passed
         self.fill_color = fill_color or ("#FFFFFF" if self.inverted.get() else "#000000")
 
+        # Small state for click-timing (single vs double)
+        self._single_click_job = None
+
         # (RE)BIND CLICKS based on click_mode
         for seq in ("<Button-1>", "<Button-3>", "<Double-1>"):
             try:
@@ -410,7 +413,8 @@ class DangerClockFrame(ClockBase):
 
         self._click_mode = click_mode
         if click_mode == "normal":
-            self.canvas.bind("<Button-1>", self._on_left_click)
+            # Defer single-click fill slightly so a double-click can cancel it
+            self.canvas.bind("<Button-1>", self._on_single_click_candidate)
             self.canvas.bind("<Button-3>", self._on_right_click)
             self.canvas.bind("<Double-1>", self._on_double_click)
         elif click_mode == "serial_next":
@@ -487,6 +491,29 @@ class DangerClockFrame(ClockBase):
         if idx is not None:
             self.filled[idx] = True
             self._redraw_circle()
+
+    def _on_single_click_candidate(self, event):
+        """Schedule a single-click action unless a double-click cancels it."""
+        # Cancel any previous pending single-click
+        if self._single_click_job is not None:
+            try:
+                self.after_cancel(self._single_click_job)
+            except Exception:
+                pass
+            self._single_click_job = None
+
+        # Capture coordinates now; schedule the fill shortly
+        x, y = event.x, event.y
+        self._single_click_job = self.after(220, lambda: self._apply_single_click(x, y))
+
+    def _apply_single_click(self, x, y):
+        """Actually perform the single-click fill (called after short delay)."""
+        self._single_click_job = None
+        idx = self._pos_to_segment(x, y)
+        if idx is not None:
+            self.filled[idx] = True
+            self._redraw_circle()
+
 
     def _on_right_click(self, event):
         """Un-fill the clicked segment (turn it off)."""
@@ -864,10 +891,8 @@ class DangerClockFrame(ClockBase):
 
         top = tk.Toplevel(self)
         top.title("Edit Segment Labels")
-        top.transient(self.winfo_toplevel())
-        top.grab_set()
-        # NEW: center it over the app window
-        center_window_over_parent(self, top)
+        # (No transient/grab_set; we size+center below and use wait_window at end)
+        # (We will size and center after laying out widgets)
 
         frm = ttk.Frame(top, padding=8)
         frm.pack(fill="both", expand=True)
@@ -876,7 +901,7 @@ class DangerClockFrame(ClockBase):
         for i in range(segs):
             row = ttk.Frame(frm)
             row.pack(fill="x", pady=2)
-            ttk.Label(row, text=f"Segment {i}").pack(side="left", padx=(0,8))
+            ttk.Label(row, text=f"Segment {i+1}").pack(side="left", padx=(0,8))
             e = ttk.Entry(row, width=32)
             e.pack(side="left", fill="x", expand=True)
             e.insert(0, self.labels[i] or "")
@@ -905,17 +930,65 @@ class DangerClockFrame(ClockBase):
         ttk.Button(btns, text="Clear All", command=do_clear_all).pack(side="left", padx=8)  # <— NEW
         ttk.Button(btns, text="Cancel", command=do_cancel).pack(side="right")
 
+        # --- Auto-size the window to fit all rows, then center over parent ---
+        try:
+            top.update_idletasks()
+            req_w = max(420, top.winfo_reqwidth())
+            req_h = max(260, top.winfo_reqheight())
+            try:
+                center_window_over_parent(self, top, width=int(req_w), height=int(req_h))
+            except Exception:
+                pass
+        except Exception:
+            try:
+                center_window_over_parent(self, top)
+            except Exception:
+                pass
+
         # focus first entry
         top.after(50, lambda: (entries[0].focus_set(), entries[0].select_range(0, 'end')))
         self.wait_window(top)
 
     def _on_double_click(self, event):
+        # Cancel the pending single-click fill so double-click does NOT fill
+        if self._single_click_job is not None:
+            try:
+                self.after_cancel(self._single_click_job)
+            except Exception:
+                pass
+            self._single_click_job = None
+
         idx = self._pos_to_segment(event.x, event.y)
         if idx is None:
             return
         # quick prompt
         top = tk.Toplevel(self)
-        top.title(f"Label for Segment {idx}")
+        top.title(f"Label for Segment {idx + 1}")
+        # (No transient/grab_set; wait_window below keeps it modal in practice)
+        center_window_over_parent(self, top)
+
+        frm = ttk.Frame(top, padding=8);
+        frm.pack(fill="both", expand=True)
+
+        ent = ttk.Entry(frm, width=36)
+        ent.pack(fill="x");
+        ent.insert(0, self.labels[idx] or "")
+        btns = ttk.Frame(frm);
+        btns.pack(fill="x", pady=(8, 0))
+
+        def ok():
+            self.labels[idx] = ent.get().strip()
+            top.destroy();
+            self.draw()
+
+        def cancel():
+            top.destroy()
+
+        ttk.Button(btns, text="OK", command=ok).pack(side="left")
+        ttk.Button(btns, text="Cancel", command=cancel).pack(side="right")
+        top.after(50, lambda: (ent.focus_set(), ent.select_range(0, 'end')))
+        self.wait_window(top)
+
         top.transient(self.winfo_toplevel()); top.grab_set()
         # NEW:
         center_window_over_parent(self, top)
@@ -1004,7 +1077,20 @@ class RacingClocksFrame(ttk.Frame):
             self.notes = res
 
     def reset_all(self):
+        # Ask whether to also clear labels on all dials
+        ans = messagebox.askquestion(
+            "Reset All",
+            "Reset all clocks on this tab?\n\nAlso clear ALL segment labels?",
+            icon="question",
+            parent=self.winfo_toplevel()
+        )
+        clear_labels = (ans == "yes")
+
         for d in self.dials:
+            if clear_labels:
+                d.labels = [""] * int(d.segments.get())
+                # keep the current Show Labels toggle state
+                d.show_labels.set(d.show_labels.get())
             d.reset()
 
     # ---- Internal helpers ----
