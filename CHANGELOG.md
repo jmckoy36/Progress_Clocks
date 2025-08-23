@@ -26,6 +26,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Inline note** under per-dial timer entries: “ⓘ fills segments evenly over total time.”
 
 ### Changed
+- Danger Clocks: Settings button moved to the tab’s top bar for consistency.
+- Racing Clocks: Removed per‑dial Settings buttons; use the tab‑level **Settings** dialog only.
+- Linked Clocks: Removed per‑dial Settings; consolidated options into the tab‑level **Settings** dialog.  
+- Linked Clocks: “Show Countdown Overlay” now defaults to **unchecked** on launch.
+- Linked Clocks: “Enable Timer Alarms” checkbox now starts **unchecked** with no indeterminate state.
+- Linked Clocks: Reverted the completion sound to the original single “ding”.
+- Linked Clocks: Shifted **Start**/**Stop** controls left so they are not clipped on narrower windows.
 - **Edit Segment Labels** now shows Segment numbers starting at **1** instead of 0 for clarity.
 - **Edit Labels dialog** auto-sizes to fit all segment entries and centers over the app window.
 - **Linked Clocks timing behavior**: countdowns now fill segments proportionally across the total time (e.g., 4 segments over 4 minutes = 1 per minute).
@@ -49,6 +56,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Timed dial completion alarm**: now consistently triggers as expected.
 - **Duplicate “Clock Name” field** in Danger Clock UI removed.
 
+### Notes
+- No data format changes; session files remain compatible with 2.1.0.
+- 
 ---
 
 ## [v2.0.0] - 2025-08-21
