@@ -176,6 +176,51 @@ def open_notes_modal(parent, initial_text: str, title_text: str) -> str | None:
     parent.wait_window(top)
     return result["val"]
 
+class SimpleSettingsDialog(tk.Toplevel):
+    """Reusable modal with a vertical list of checkboxes and OK/Cancel."""
+    def __init__(self, parent, title, items: list[tuple[str, tk.Variable]]):
+        super().__init__(parent)
+        self.title(title)
+        self.transient(parent)
+        self.grab_set()
+        self.resizable(False, False)
+
+        frm = ttk.Frame(self, padding=10)
+        frm.pack(fill="both", expand=True)
+
+        # Checkboxes
+        for text, var in items:
+            ttk.Checkbutton(frm, text=text, variable=var).pack(anchor="w", pady=2)
+
+        # Buttons
+        btns = ttk.Frame(frm)
+        btns.pack(fill="x", pady=(10,0))
+        ttk.Button(btns, text="OK", command=self._ok).pack(side="right")
+        ttk.Button(btns, text="Cancel", command=self._cancel).pack(side="right", padx=(0,8))
+
+        # Close handlers
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+        self.result = None
+        self._parent = parent
+
+        # Center over parent
+        self.update_idletasks()
+        try:
+            x = parent.winfo_rootx() + (parent.winfo_width() // 2) - (self.winfo_width() // 2)
+            y = parent.winfo_rooty() + (parent.winfo_height() // 2) - (self.winfo_height() // 2)
+            self.geometry(f"+{x}+{y}")
+        except Exception:
+            pass
+
+    def _ok(self):
+        self.result = True
+        self.destroy()
+
+    def _cancel(self):
+        self.result = False
+        self.destroy()
+
+
 # ---------------------------
 # Shared ClockBase (very small)
 #     The ClockBase(ttk.Frame) class is a base class that holds shared logic for all clock types.
@@ -194,14 +239,10 @@ class ClockBase(ttk.Frame):
         # Support shared dark-mode var (used by Racing container later)
         self._uses_shared_inverted = shared_inverted_var is not None
         self.inverted = shared_inverted_var or tk.BooleanVar(value=bool(inverted))
-        self._inv_trace_id = None
 
-        if not self._uses_shared_inverted:
-            inv = ttk.Checkbutton(self, text="Dark Mode", variable=self.inverted, command=self._on_theme_changed)
-            inv.grid(row=0, column=4, padx=(6, 10), pady=(8, 0), sticky="w")
-        else:
-            # When shared, listen for changes to redraw (remember the trace id so we can remove it)
-            self._inv_trace_id = self.inverted.trace_add("write", lambda *_: self._on_theme_changed())
+        # Always listen for changes to redraw, regardless of shared/non-shared.
+        # (Dark Mode checkbox removed; toggled via the Settings dialog.)
+        self._inv_trace_id = self.inverted.trace_add("write", lambda *_: self._on_theme_changed())
 
         ttk.Button(self, text="Notes", command=self.open_notes).grid(row=0, column=5, padx=6, pady=(8,0))
 
@@ -261,7 +302,9 @@ class DangerClockFrame(ClockBase):
         self.title_var.trace_add("write", lambda *_: self.draw())
         # OPTIONAL: live-update on each keystroke as well
         title_entry.bind("<KeyRelease>", lambda e: self.draw())
-
+        # Settings button on the top bar
+        ttk.Button(self, text="Settings", command=self.open_settings).grid(row=0, column=4, padx=(6, 6), pady=(8, 0),
+                                                                           sticky="w")
         # --- Segments: allow a shared IntVar (used by Racing container later) ---
         self._uses_shared_segments = shared_segments_var is not None
         self.segments = shared_segments_var or tk.IntVar(value=int(segments))
@@ -657,6 +700,13 @@ class DangerClockFrame(ClockBase):
 
         self.draw()
 
+    def open_settings(self):
+        items = [("Dark Mode", self.inverted)]
+        dlg = SimpleSettingsDialog(self.winfo_toplevel(), "Danger Clock Settings", items)
+        self.wait_window(dlg)
+        if dlg.result:
+            self._on_theme_changed()
+
     # serialization
     def to_dict(self):
         return {
@@ -845,9 +895,6 @@ class RacingClocksFrame(ttk.Frame):
         seg_box = ttk.Combobox(top, state="readonly", values=SEGMENT_CHOICES, width=6, textvariable=self.segments_var)
         seg_box.pack(side="left")
 
-        inv = ttk.Checkbutton(top, text="Dark Mode", variable=self.inverted_var, command=self._on_theme_changed_all)
-        inv.pack(side="left", padx=(12, 4))
-
         ttk.Button(top, text="Notes", command=self.open_notes).pack(side="left", padx=(6, 12))
 
         self.add_btn = ttk.Button(top, text="Add Dial", command=self._add_dial)
@@ -857,6 +904,7 @@ class RacingClocksFrame(ttk.Frame):
         self.remove_btn.pack(side="left", padx=(0, 12))
 
         ttk.Button(top, text="Reset All", command=self.reset_all).pack(side="left")
+        ttk.Button(top, text="Settings", command=self.open_settings).pack(side="left", padx=(6, 0))
 
         # ---- Dials area ----
         self.dials_frame = ttk.Frame(self)
@@ -927,6 +975,12 @@ class RacingClocksFrame(ttk.Frame):
         for d in self.dials:
             d._on_theme_changed()
 
+    def open_settings(self):
+        items = [("Dark Mode", self.inverted_var)]
+        dlg = SimpleSettingsDialog(self.winfo_toplevel(), "Racing Clocks Settings", items)
+        self.wait_window(dlg)
+        if dlg.result:
+            self._on_theme_changed_all()
 
     # --- MOVE THESE INSIDE THE CLASS (indent them) ---
     def _update_dial_buttons(self):
@@ -1022,7 +1076,7 @@ class LinkedClocksFrame(ttk.Frame):
         self.inverted_var = tk.BooleanVar(value=False)
         self.notes = notes or ""
 
-        self._show_overlay = tk.BooleanVar(value=True)
+        self._show_overlay = tk.BooleanVar(value=False)
         self.overlay_color = tk.StringVar(value="#000000")  # default black; flips in dark mode
 
         # Timer engine state
@@ -1055,18 +1109,13 @@ class LinkedClocksFrame(ttk.Frame):
         seg_box.grid(row=0, column=3, sticky="w")
         seg_box.bind("<<ComboboxSelected>>", lambda e: self._on_segments_changed())
 
-        ttk.Checkbutton(top, text="Dark Mode", variable=self.inverted_var, command=self._on_theme_changed_all) \
-            .grid(row=0, column=4, sticky="w", padx=(12, 4))
-
         ttk.Button(top, text="Notes", command=self.open_notes).grid(row=0, column=5, sticky="w", padx=(6, 12))
+        ttk.Button(top, text="Settings", command=self.open_settings).grid(row=0, column=6, sticky="w", padx=(0, 6))
 
         # Row 1: add/remove/reset/overlay + (Commit C) overlay color + master controls at right
         ttk.Button(top, text="Add Dial", command=self._add_dial).grid(row=1, column=0, sticky="w", padx=(0, 6))
         ttk.Button(top, text="Remove Dial", command=self._remove_dial).grid(row=1, column=1, sticky="w", padx=(0, 12))
         ttk.Button(top, text="Reset All", command=self.reset_all).grid(row=1, column=2, sticky="w", padx=(0, 12))
-
-        ttk.Checkbutton(top, text="Show Countdown Overlay", variable=self._show_overlay,
-                        command=self._redraw_overlays).grid(row=1, column=3, sticky="w", padx=(0, 12))
 
         def _choose_overlay_color():
             (rgb, hexv) = colorchooser.askcolor(
@@ -1080,9 +1129,7 @@ class LinkedClocksFrame(ttk.Frame):
 
         ttk.Button(top, text="Overlay Color", command=_choose_overlay_color) \
             .grid(row=1, column=4, sticky="w", padx=(0, 12))
-        self.beep_on_complete = tk.BooleanVar(value=True)
-        ttk.Checkbutton(top, text="Beep on dial complete", variable=self.beep_on_complete) \
-            .grid(row=1, column=5, sticky="w", padx=(0, 12))
+        self.beep_on_complete = tk.BooleanVar(value=False)  # default unchecked; Settings dialog controls it
 
         # (Commit C will insert an "Overlay Color" button into column 4 here)
 
@@ -1234,7 +1281,7 @@ class LinkedClocksFrame(ttk.Frame):
             self.dials[idx]._set_fill_count(segs)
             self.dials[idx].draw()
             if getattr(self, "beep_on_complete", None) and self.beep_on_complete.get():
-                self._beep_triplet()
+                self._beep_once()
 
         self._redraw_overlays()
         self._bind_serial_clicks()  # <-- NEW
@@ -1448,25 +1495,19 @@ class LinkedClocksFrame(ttk.Frame):
             r, c = divmod(i, cols)
             wgt.grid(row=r, column=c, sticky="nsew", padx=6, pady=6)
 
-    def _beep_triplet(self):
-        """Play three quick beeps when a dial completes."""
+    def _beep_once(self):
+        """Play a single ding when a dial completes (original behavior)."""
         root = self.winfo_toplevel()
         try:
-            # Windows: winsound for reliable beeps
             import platform
             if platform.system().lower().startswith("win"):
                 try:
                     import winsound
-                    winsound.Beep(880, 120)
-                    root.after(160, lambda: winsound.Beep(880, 120))
-                    root.after(320, lambda: winsound.Beep(880, 120))
+                    winsound.Beep(880, 180)
                     return
                 except Exception:
                     pass
-            # Fallback: Tk bell with slightly longer gaps to avoid coalescing
             root.bell()
-            root.after(200, root.bell)
-            root.after(400, root.bell)
         except Exception:
             pass
 
@@ -1486,6 +1527,21 @@ class LinkedClocksFrame(ttk.Frame):
 
         self._redraw_overlays()
 
+    def open_settings(self):
+        items = [
+            ("Show Countdown Overlay", self._show_overlay),
+            ("Enable Timer Alarms", self.beep_on_complete),
+            ("Dark Mode", self.inverted_var),
+        ]
+
+        dlg = SimpleSettingsDialog(self.winfo_toplevel(), "Linked Clocks Settings", items)
+        self.wait_window(dlg)
+        if dlg.result:
+            # Apply any visual/behavior side‑effects from toggles
+            self._on_theme_changed_all()
+            self._redraw_overlays()
+            self._bind_serial_clicks()
+
     # ------------- Persistence -------------
 
     def to_dict(self) -> dict:
@@ -1496,6 +1552,7 @@ class LinkedClocksFrame(ttk.Frame):
             "inverted": bool(self.inverted_var.get()),
             "notes": self.notes,
             "show_overlay": bool(self._show_overlay.get()),
+            "beep_on_complete": bool(self.beep_on_complete.get()),
             "dials": [
                 {
                     **d.to_dict(),
@@ -1510,7 +1567,8 @@ class LinkedClocksFrame(ttk.Frame):
         self.segments_var.set(int(data.get("segments", 4)))
         self.inverted_var.set(bool(data.get("inverted", False)))
         self.notes = data.get("notes", "")
-        self._show_overlay.set(bool(data.get("show_overlay", True)))
+        self._show_overlay.set(bool(data.get("show_overlay", False)))
+        self.beep_on_complete.set(bool(data.get("beep_on_complete", False)))
 
         # Rebuild dials
         for d in self.dials:
