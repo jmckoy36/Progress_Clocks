@@ -328,7 +328,7 @@ class DangerClockFrame(ClockBase):
 
         ttk.Button(line1, text="−1", width=6, command=self.decrease).pack(side="left", padx=6)
         ttk.Button(line1, text="+1", width=6, command=self.increase).pack(side="left", padx=6)
-        ttk.Button(line1, text="Reset", width=8, command=self.reset).pack(side="left", padx=6)
+        ttk.Button(line1, text="Reset", width=8, command=self.reset_with_prompt).pack(side="left", padx=6)
 
         ttk.Button(line1, text="Fill Color", command=self.choose_fill_color).pack(side="left", padx=12)
         self.fill_preview = tk.Label(line1, width=8, bg=self.fill_color, relief="sunken")
@@ -469,6 +469,20 @@ class DangerClockFrame(ClockBase):
         # Clear all segments
         self._set_fill_count(0)
         self.draw()
+
+    def reset_with_prompt(self):
+        """Ask whether to also clear labels when resetting this single clock."""
+        ans = messagebox.askquestion(
+            "Reset Clock",
+            "Reset this clock?\n\nAlso clear segment labels?",
+            icon="question",
+            parent=self.winfo_toplevel()
+        )
+        # 'yes' means also clear labels; 'no' means leave labels
+        if ans == "yes":
+            self.labels = [""] * int(self.segments.get())
+            self.show_labels.set(self.show_labels.get())  # keep toggle state
+        self.reset()
 
     def draw(self):
         # Bail out cleanly if widget/canvas is gone (during teardown)
@@ -752,7 +766,7 @@ class DangerClockFrame(ClockBase):
             entries.append(e)
 
         btns = ttk.Frame(frm)
-        btns.pack(fill="x", pady=(8,0))
+        btns.pack(fill="x", pady=(8, 0))
 
         def do_save():
             for i, e in enumerate(entries):
@@ -763,7 +777,15 @@ class DangerClockFrame(ClockBase):
         def do_cancel():
             top.destroy()
 
+        def do_clear_all():
+            # Clear widgets immediately, and also clear labels on the clock
+            for i, e in enumerate(entries):
+                e.delete(0, "end")
+                self.labels[i] = ""
+            self.draw()
+
         ttk.Button(btns, text="Save Labels", command=do_save).pack(side="left")
+        ttk.Button(btns, text="Clear All", command=do_clear_all).pack(side="left", padx=8)  # <— NEW
         ttk.Button(btns, text="Cancel", command=do_cancel).pack(side="right")
 
         # focus first entry
@@ -1008,10 +1030,20 @@ class LinkedClocksFrame(ttk.Frame):
         self._job = None
 
         # --- Top bar (2-row grid to avoid clipping) ---
-        top = ttk.Frame(self);
+        top = ttk.Frame(self)
         top.pack(fill="x", padx=8, pady=(8, 0))
-        for c in range(8): top.columnconfigure(c, weight=1)
-        top.grid_rowconfigure(1, minsize=36)  # ensure row 2 has height
+        for c in range(8):
+            top.columnconfigure(c, weight=1)
+        # Make row 1 a bit taller; prevent control clipping
+        top.grid_rowconfigure(1, minsize=44)
+
+        # Give some columns minimum width so text like "Dark Mode" and buttons don't truncate
+        top.grid_columnconfigure(0, minsize=90)  # "Tab Title:" label
+        top.grid_columnconfigure(1, minsize=160)  # title entry
+        top.grid_columnconfigure(2, minsize=90)  # "Segments:" label
+        top.grid_columnconfigure(3, minsize=110)  # segments combobox / overlay cb
+        top.grid_columnconfigure(4, minsize=110)  # "Dark Mode" / "Overlay Color"
+        top.grid_columnconfigure(5, minsize=90)  # "Notes" / "Beep on dial complete"
 
         # Row 0: title / segments / dark / notes
         ttk.Label(top, text="Tab Title:").grid(row=0, column=0, sticky="w", padx=(0, 6))
@@ -1069,6 +1101,7 @@ class LinkedClocksFrame(ttk.Frame):
         self.dials_frame = ttk.Frame(self); self.dials_frame.pack(fill="both", expand=True, padx=8, pady=8)
         for c in range(3): self.dials_frame.columnconfigure(c, weight=1)
         for r in range(2): self.dials_frame.rowconfigure(r, weight=1)
+        self.dials_frame.bind("<Configure>", lambda e: self._relayout())
 
         self.dials: list[DangerClockFrame] = []
         self.timer_secs: list[tk.IntVar] = []      # per-dial configured countdown seconds
@@ -1094,8 +1127,28 @@ class LinkedClocksFrame(ttk.Frame):
 
     def reset_all(self):
         self.stop()
-        for d in self.dials: d.reset()
-        # reset remaining to configured values
+
+        # Ask about clearing labels
+        ans = messagebox.askquestion(
+            "Reset All",
+            "Reset all clocks on this tab?\n\nAlso clear ALL segment labels and timers?",
+            icon="question",
+            parent=self.winfo_toplevel()
+        )
+        clear_labels_and_timers = (ans == "yes")
+
+        for d in self.dials:
+            if clear_labels_and_timers:
+                d.labels = [""] * int(d.segments.get())
+            d.reset()
+
+        if clear_labels_and_timers:
+            # Timers back to 00:00:00 for all
+            for v in self.timer_secs:
+                v.set(0)
+            # Also zero out elapsed so overlays show 00:00:00
+            self.elapsed_ms = [0 for _ in self.dials]
+
         self._reset_all_remaining()
         self._redraw_overlays()
         self._validate_start_button()
@@ -1253,6 +1306,10 @@ class LinkedClocksFrame(ttk.Frame):
         for i, d in enumerate(self.dials):
             # clear our binds
             for seq in ("<Button-1>", "<Button-3>"):
+                # Additionally, prevent accidental interactions on inactive canvases
+                # by ignoring clicks. We only rebind for the active dial below.
+                d.canvas.bind("<Button-1>", lambda e: None)
+                d.canvas.bind("<Button-3>", lambda e: None)
                 try:
                     d.canvas.unbind(seq)
                 except Exception:
@@ -1263,8 +1320,13 @@ class LinkedClocksFrame(ttk.Frame):
 
             if i == active:
                 # left click always advances one
-                d.canvas.bind("<Button-1>",
-                              lambda e, di=d: (di.increase(), self._redraw_overlays(), self._bind_serial_clicks()))
+                d.canvas.bind("<Button-1>", lambda e, di=d: (
+                    getattr(di, "_parse_timer", lambda *a, **k: None)(),  # commit HH:MM:SS if user just typed
+                    di.increase(),
+                    self._redraw_overlays(),
+                    self._bind_serial_clicks()
+                ))
+
                 # right click: only in manual mode (no timers anywhere)
                 if not timers:
                     def _unfill(_e, di=d):
@@ -1324,6 +1386,8 @@ class LinkedClocksFrame(ttk.Frame):
             self._validate_start_button()
             self._redraw_overlays()
 
+        dial._parse_timer = parse_and_set  # <— NEW: stash parser for this dial
+
         ent.insert(0, "00:00:00")
         ent.bind("<FocusOut>", parse_and_set)
         ent.bind("<Return>", parse_and_set)
@@ -1352,18 +1416,57 @@ class LinkedClocksFrame(ttk.Frame):
         self._bind_serial_clicks()
 
     def _relayout(self):
-        for w in self.dials: w.grid_forget()
-        for i,w in enumerate(self.dials):
-            r,c = divmod(i,3)
-            w.grid(row=r, column=c, sticky="nsew", padx=6, pady=6)
+        # Determine columns based on available width
+        try:
+            w = max(1, int(self.dials_frame.winfo_width()))
+        except Exception:
+            w = 900
+        # Simple breakpoints; tweak as you like
+        if w < 760:
+            cols = 1
+        elif w < 1100:
+            cols = 2
+        else:
+            cols = 3
+
+        # Configure grid
+        for c in range(3):
+            self.dials_frame.columnconfigure(c, weight=0)
+        for r in range(2):
+            self.dials_frame.rowconfigure(r, weight=0)
+
+        for c in range(cols):
+            self.dials_frame.columnconfigure(c, weight=1)
+        rows = (len(self.dials) + cols - 1) // cols
+        for r in range(rows):
+            self.dials_frame.rowconfigure(r, weight=1)
+
+        # Place widgets
+        for wgt in self.dials:
+            wgt.grid_forget()
+        for i, wgt in enumerate(self.dials):
+            r, c = divmod(i, cols)
+            wgt.grid(row=r, column=c, sticky="nsew", padx=6, pady=6)
 
     def _beep_triplet(self):
         """Play three quick beeps when a dial completes."""
         root = self.winfo_toplevel()
         try:
+            # Windows: winsound for reliable beeps
+            import platform
+            if platform.system().lower().startswith("win"):
+                try:
+                    import winsound
+                    winsound.Beep(880, 120)
+                    root.after(160, lambda: winsound.Beep(880, 120))
+                    root.after(320, lambda: winsound.Beep(880, 120))
+                    return
+                except Exception:
+                    pass
+            # Fallback: Tk bell with slightly longer gaps to avoid coalescing
             root.bell()
-            root.after(150, root.bell)
-            root.after(300, root.bell)
+            root.after(200, root.bell)
+            root.after(400, root.bell)
         except Exception:
             pass
 
