@@ -1867,6 +1867,245 @@ class LinkedClocksFrame(ttk.Frame):
         self._cancel_tick()
         super().destroy()
 
+class TugOfWarFrame(ttk.Frame):
+    """
+    Tug-of-War progress bar over a fixed scrimmage line.
+    - Start: bar centered (equal on both sides)
+    - Buttons: ← pulls bar left, → pulls bar right
+    - Win: bar fully on one side -> announce that side's Outcome text
+    """
+    TYPE = "tug"
+
+    STEP_CHOICES = (4, 6, 8, 12)  # clicks to fully win either side (like Segments)
+
+    def __init__(self, master, initial_title="Tug-of-War", notes="", initial_steps=6, inverted=False):
+        super().__init__(master)
+
+        self.title_var = tk.StringVar(value=initial_title)
+        self.notes = notes or ""
+        self.inverted = tk.BooleanVar(value=bool(inverted))
+
+        # Steps (how many clicks to win)
+        self.steps = tk.IntVar(value=int(initial_steps))
+        if self.steps.get() not in self.STEP_CHOICES:
+            self.steps.set(self.STEP_CHOICES[1])
+
+        # State: shift in [-steps .. +steps]
+        self.shift = tk.IntVar(value=0)
+
+        # Outcome labels + colors
+        self.left_outcome  = tk.StringVar(value="Outcome A")
+        self.right_outcome = tk.StringVar(value="Outcome B")
+        # Defaults: Outcome A (left) = Green, Outcome B (right) = Red
+        self.left_color  = "#2ECC71"   # green
+        self.right_color = "#E74C3C"   # red
+
+        # ---- Top bar ----
+        top = ttk.Frame(self)
+        top.pack(fill="x", padx=8, pady=(8, 0))
+
+        ttk.Label(top, text="Tab Title:").pack(side="left")
+        ent = ttk.Entry(top, textvariable=self.title_var, width=28, justify="center")
+        ent.pack(side="left", padx=(6, 12))
+
+        ttk.Label(top, text="Length (steps):").pack(side="left", padx=(0, 6))
+        step_box = ttk.Combobox(top, state="readonly", values=self.STEP_CHOICES, width=6, textvariable=self.steps)
+        step_box.pack(side="left")
+        step_box.bind("<<ComboboxSelected>>", lambda e: self._on_steps_changed())
+
+        ttk.Button(top, text="Notes", command=self.open_notes).pack(side="left", padx=(6, 12))
+        ttk.Button(top, text="Settings", command=self.open_settings).pack(side="left")
+
+        # ---- Canvas area ----
+        self.canvas = tk.Canvas(self, bg="white", highlightthickness=0)
+        self.canvas.pack(fill="both", expand=True, padx=8, pady=8)
+        self.canvas.bind("<Configure>", lambda e: self.draw())
+
+        # ---- Controls under the scrimmage line ----
+        controls = ttk.Frame(self)
+        controls.pack(pady=(0, 10))
+
+        # Arrows (Unicode — no external images needed)
+        self.left_btn  = ttk.Button(controls, text="←", width=4, command=self.pull_left)
+        self.right_btn = ttk.Button(controls, text="→", width=4, command=self.pull_right)
+        self.left_btn.pack(side="left", padx=(0, 6))
+        self.right_btn.pack(side="left", padx=(6, 0))
+
+        # Color pickers + Reset
+        colors = ttk.Frame(self)
+        colors.pack(pady=(0, 2))
+        ttk.Button(colors, text="Outcome A Fill Color", command=lambda: self._choose_color(side="left")).pack(side="left", padx=6)
+        ttk.Button(colors, text="Reset", command=self.reset).pack(side="left", padx=(12, 6))
+        ttk.Button(colors, text="Outcome B Fill Color", command=lambda: self._choose_color(side="right")).pack(side="left", padx=6)
+
+
+        self.after_idle(self.draw)
+
+    # ---------- UI actions ----------
+    def open_notes(self):
+        res = open_notes_modal(self, self.notes, self.title_var.get() or "Tug-of-War")
+        if res is not None:
+            self.notes = res
+
+    def open_settings(self):
+        items = [("Dark Mode", self.inverted)]
+        dlg = SimpleSettingsDialog(self.winfo_toplevel(), "Tug-of-War Settings", items)
+        self.wait_window(dlg)
+        if dlg.result:
+            self.draw()
+
+    def _choose_color(self, side="left"):
+        label = "Outcome A" if side == "left" else "Outcome B"
+        (rgb, hexv) = colorchooser.askcolor(
+            color=self.left_color if side == "left" else self.right_color,
+            title=f"Choose {label} Fill Color",
+            parent=self.winfo_toplevel()
+        )
+
+        if hexv:
+            if side == "left":
+                self.left_color = hexv
+            else:
+                self.right_color = hexv
+            self.draw()
+
+    def _on_steps_changed(self):
+        # Clamp shift to new range
+        s = int(self.steps.get())
+        self.shift.set(max(-s, min(self.shift.get(), s)))
+        self.draw()
+
+    def pull_left(self):
+        s = int(self.steps.get())
+        if self.shift.get() > -s:
+            self.shift.set(self.shift.get() - 1)
+            self.draw()
+            if self.shift.get() == -s:
+                messagebox.showinfo("Tug-of-War", f"{self.left_outcome.get().strip() or 'Left'} wins!", parent=self.winfo_toplevel())
+
+    def pull_right(self):
+        s = int(self.steps.get())
+        if self.shift.get() <  s:
+            self.shift.set(self.shift.get() + 1)
+            self.draw()
+            if self.shift.get() == s:
+                messagebox.showinfo("Tug-of-War", f"{self.right_outcome.get().strip() or 'Right'} wins!", parent=self.winfo_toplevel())
+
+    def reset(self):
+        # Reset bar position
+        self.shift.set(0)
+        # Reset colors to defaults (Outcome A = Green, Outcome B = Red)
+        self.left_color = "#2ECC71"  # green
+        self.right_color = "#E74C3C"  # red
+        self.draw()
+
+    # ---------- Drawing ----------
+    def _colors(self):
+        return {"bg": "black", "fg": "white"} if self.inverted.get() else {"bg": "white", "fg": "black"}
+
+    def draw(self):
+        if not self.winfo_exists() or not self.canvas.winfo_exists():
+            return
+        c = self.canvas
+        w = max(1, c.winfo_width()); h = max(1, c.winfo_height())
+        if w < 300 or h < 160:
+            c.after(50, self.draw); return
+
+        colors = self._colors()
+        c.delete("all")
+        c.configure(bg=colors["bg"])
+
+        # Title (auto-fit)
+        title_text = self.title_var.get()
+        avail_w = max(1, w - 2 * PADDING)
+        size = 16
+        try:
+            f = tkfont.Font(family="Arial", size=size, weight="bold")
+            while f.measure(title_text) > avail_w and size > 9:
+                size -= 1; f.configure(size=size)
+        except Exception:
+            f = ("Arial", 12, "bold")
+        c.create_text(w/2, 8, text=title_text, fill=colors["fg"], font=f, anchor="n")
+
+        # Layout rect
+        top_y = TITLE_SPACE + 4
+        bottom_y = h - 84  # leave room for buttons
+        mid_y = (top_y + bottom_y) / 2
+        cx = w / 2
+
+        # Outcomes (entries) above each half
+        # Left entry
+        le = ttk.Entry(self, textvariable=self.left_outcome, justify="center", width=24)
+        re = ttk.Entry(self, textvariable=self.right_outcome, justify="center", width=24)
+
+        # Move labels well above the bar so they never collide with moving segments
+        labels_y = top_y - 10
+        c.create_window(cx - w*0.25, labels_y, window=le, anchor="center")
+        c.create_window(cx + w*0.25, labels_y, window=re, anchor="center")
+
+        # Scrimmage line (fixed)
+        c.create_line(cx, top_y+6, cx, bottom_y-6, fill=colors["fg"], width=2)
+
+        # Bar geometry
+        total_w = min(w - 2*PADDING, 720)
+        bar_h = max(12, int((bottom_y - top_y) * 0.14))
+        y0 = mid_y - bar_h/2
+        y1 = mid_y + bar_h/2
+
+        # Steps logic:
+        # Treat the bar as a fixed-length rope with 2*s visible segments.
+        # shift ∈ [-s..+s]: negative = Outcome A pulled rope right; positive = Outcome B pulled rope left.
+        s = max(1, int(self.steps.get()))
+        total_segments = 2 * s
+        seg_w = total_w / total_segments
+        start_x = cx - (total_w / 2)
+
+        # Number of segments currently on Outcome A's side (left of the boundary).
+        # When shift increases (→), boundary moves left; when shift decreases (←), boundary moves right.
+        left_count = s - int(self.shift.get())
+        left_count = max(0, min(total_segments, left_count))
+
+        # Paint the entire rope each draw so it clearly "slides" across the scrimmage line.
+        for j in range(total_segments):
+            seg_x0 = start_x + j * seg_w
+            seg_x1 = seg_x0 + seg_w
+            fill = self.left_color if j < left_count else self.right_color
+            c.create_rectangle(seg_x0, y0, seg_x1, y1, fill=fill, outline=colors["fg"], width=1)
+
+        # Scrimmage line overlay (fixed at true center)
+        c.create_line(cx, top_y+6, cx, bottom_y-6, fill=colors["fg"], width=2)
+
+        # Label the center (optional, subtle)
+        c.create_text(cx, mid_y + bar_h/2 + 10, text="Scrimmage Line", fill=colors["fg"], font=("Arial", 9))
+
+    # ---------- Persistence ----------
+    def to_dict(self) -> dict:
+        return {
+            "type": self.TYPE,
+            "title": self.title_var.get(),
+            "notes": self.notes,
+            "inverted": bool(self.inverted.get()),
+            "steps": int(self.steps.get()),
+            "shift": int(self.shift.get()),
+            "left_outcome": self.left_outcome.get(),
+            "right_outcome": self.right_outcome.get(),
+            "left_color": self.left_color,
+            "right_color": self.right_color,
+        }
+
+    def from_dict(self, data: dict):
+        self.title_var.set(data.get("title", "Tug-of-War"))
+        self.notes = data.get("notes", "")
+        self.inverted.set(bool(data.get("inverted", False)))
+        self.steps.set(int(data.get("steps", self.STEP_CHOICES[1])))
+        self.shift.set(int(data.get("shift", 0)))
+        self.left_outcome.set(str(data.get("left_outcome", "Outcome A")))
+        self.right_outcome.set(str(data.get("right_outcome", "Outcome B")))
+        self.left_color  = data.get("left_color",  self.left_color)
+        self.right_color = data.get("right_color", self.right_color)
+        self._on_steps_changed()
+        self.draw()
+
 
 # ---------------------------
 # App shell (minimal)
@@ -1921,6 +2160,8 @@ class MultiClockApp(tk.Tk):
                                                                                                 pady=6)
         ttk.Button(self.toolbar, text="Add Linked Clocks", command=self.add_linked_clocks).pack(side="left", padx=6,
                                                                                                 pady=6)
+        ttk.Button(self.toolbar, text="Add Tug-of-War", command=self.add_tug_of_war).pack(side="left", padx=6, pady=6)
+
         ttk.Button(self.toolbar, text="Remove Current", command=self.remove_current).pack(side="left", padx=6, pady=6)
 
         # ---- Notebook in the middle ----
@@ -2119,6 +2360,7 @@ class MultiClockApp(tk.Tk):
         self.nb.select(frame)
         return frame
 
+
     # ---------- Save / Load ----------
 
     def save_session(self):
@@ -2188,6 +2430,11 @@ class MultiClockApp(tk.Tk):
                 frame = self.add_linked_clocks(title=item.get("title", "Linked Clocks"))
                 if hasattr(frame, "from_dict"): frame.from_dict(item)
 
+            elif t == getattr(TugOfWarFrame, "TYPE", "tug"):
+                frame = self.add_tug_of_war(title=item.get("title", "Tug-of-War"))
+                if hasattr(frame, "from_dict"):
+                    frame.from_dict(item)
+
             else:
                 # Unknown tab type; skip gracefully
                 continue
@@ -2224,6 +2471,41 @@ class MultiClockApp(tk.Tk):
 
         frame.title_var.trace_add("write", lambda *_: sync())
 
+        self.nb.select(frame)
+        return frame
+
+    def add_tug_of_war(self, title=None, notes="", initial_steps=6):
+        # Auto-number default titles "Tug-of-War n"
+        existing = []
+        for tab_id in self.nb.tabs():
+            frame = self._frame_from_tab(tab_id)
+            if hasattr(frame, "title_var") and getattr(frame, "TYPE", "") == "tug":
+                existing.append(frame.title_var.get())
+        base = "Tug-of-War"
+        try:
+            default_title = _next_numbered_title(existing, base)
+        except Exception:
+            # Fallback if helper is missing
+            n = 1
+            used = set(existing)
+            default_title = base
+            while default_title in used:
+                n += 1
+                default_title = f"{base} {n}"
+
+        title = (title or default_title).strip()
+
+        frame = TugOfWarFrame(self.nb, initial_title=title, notes=notes, initial_steps=initial_steps)
+        self.nb.add(frame, text=self._short_title(title))
+
+        def sync(*_):
+            try:
+                idx = self.nb.index(frame)
+                self.nb.tab(idx, text=self._short_title(frame.title_var.get()))
+            except Exception:
+                pass
+
+        frame.title_var.trace_add("write", lambda *_: sync())
         self.nb.select(frame)
         return frame
 
