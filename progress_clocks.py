@@ -1,6 +1,19 @@
 #!/usr/bin/env python3
 """
-Progress Clocks Application
+Progress Clocks — Tkinter application
+
+Features
+- Danger Clock: circular, segmented progress tracker with labels and customizable fill color.
+- Racing Clocks: 2–6 synchronized danger clocks sharing segments and dark mode.
+- Linked Clocks: 2–6 clocks filled in order; optional HH:MM:SS timers proportionally fill segments.
+- Tug-of-War: linear bar with a fixed center line; left/right pulls determine the winner.
+- Notes support, dark mode, autosave, and JSON session persistence.
+
+Structure
+- Utility helpers (colors, window centering, monitor geometry, settings I/O)
+- Modal helpers (notes editor, simple checkbox dialog)
+- Widgets: ClockBase, DangerClockFrame, RacingClocksFrame, LinkedClocksFrame, TugOfWarFrame
+- App shell: MultiClockApp manages tabs, menus, saving/loading, and autosave
 """
 
 __version__ = "3.0.0"
@@ -55,12 +68,14 @@ def _get_monitor_rect_from_point(x: int, y: int):
             MONITOR_DEFAULTTONEAREST = 2
 
             class RECT(ctypes.Structure):
+                """ RECT class. """
                 _fields_ = [("left", ctypes.c_long),
                             ("top", ctypes.c_long),
                             ("right", ctypes.c_long),
                             ("bottom", ctypes.c_long)]
 
             class MONITORINFO(ctypes.Structure):
+                """ MONITORINFO class. """
                 _fields_ = [("cbSize", ctypes.c_ulong),
                             ("rcMonitor", RECT),
                             ("rcWork", RECT),
@@ -104,6 +119,7 @@ def _center_geometry_on_rect(width: int, height: int, rect: tuple[int, int, int,
     return f"{int(width)}x{int(height)}+{int(x)}+{int(y)}"
 
 
+# Convert a hex color like '#aabbcc' to an (r,g,b) tuple.
 def _hex_to_rgb(hex_color: str):
     s = hex_color.strip().lstrip("#")
     if len(s) == 3:
@@ -118,6 +134,7 @@ def _contrast_text_color(bg_hex: str) -> str:
     luminance = 0.2126*(r/255) + 0.7152*(g/255) + 0.0722*(b/255)
     return "#000000" if luminance > 0.6 else "#FFFFFF"
 
+# Generate a non-conflicting 'Base N' title given existing titles.
 def _next_numbered_title(existing_titles, base):
     used = set()
     for t in existing_titles:
@@ -160,6 +177,7 @@ def save_settings(data: dict) -> None:
     except Exception:
         pass
 
+# Center a Toplevel window over its parent window on the correct monitor.
 def center_window_over_parent(parent_widget, top, width=None, height=None):
     """Center Toplevel `top` over the toplevel window of `parent_widget`, on whatever monitor it's on."""
     root = parent_widget.winfo_toplevel()
@@ -228,10 +246,12 @@ def open_notes_modal(parent, initial_text: str, title_text: str) -> str | None:
     btns.pack(fill="x", pady=(8,0))
     result = {"val": None}
 
+    # Helper method: Do save.
     def do_save():
         result["val"] = txt.get("1.0", "end-1c")
         top.destroy()
 
+    # Helper method: Do cancel.
     def do_cancel():
         result["val"] = None
         top.destroy()
@@ -245,6 +265,7 @@ def open_notes_modal(parent, initial_text: str, title_text: str) -> str | None:
 
 class SimpleSettingsDialog(tk.Toplevel):
     """Reusable modal with a vertical list of checkboxes and OK/Cancel."""
+    # Helper method: Init.
     def __init__(self, parent, title, items: list[tuple[str, tk.Variable]]):
         super().__init__(parent)
         self.title(title)
@@ -279,10 +300,12 @@ class SimpleSettingsDialog(tk.Toplevel):
         except Exception:
             pass
 
+    # Helper method: Ok.
     def _ok(self):
         self.result = True
         self.destroy()
 
+    # Helper method: Cancel.
     def _cancel(self):
         self.result = False
         self.destroy()
@@ -297,6 +320,7 @@ class ClockBase(ttk.Frame):
     """Shared bits: title, invert, notes button, canvas, basic (de)serialize contract."""
     TYPE = "base"
 
+    # Helper method: Init.
     def __init__(self, master, initial_title="Clock", inverted=False, notes="", shared_inverted_var=None):
         super().__init__(master)
         self.title_var = tk.StringVar(value=initial_title)
@@ -317,6 +341,7 @@ class ClockBase(ttk.Frame):
         self.canvas.grid(row=1, column=0, columnspan=8, sticky="nsew", padx=8, pady=8)
         self.canvas.bind("<Configure>", lambda e: self.draw())
 
+    # Helper method: Destroy.
     def destroy(self):
         # detach shared dark-mode trace if any
         try:
@@ -327,13 +352,16 @@ class ClockBase(ttk.Frame):
             pass
         super().destroy()
 
+    # React to dark/light mode changes, preserving readable fill colors; redraw.
     def _on_theme_changed(self):
         """Hook for subclasses when theme flips; default just redraws."""
         self.draw()
 
+    # Return a dict of background/foreground colors for current theme.
     def _colors(self):
         return {"bg":"black","fg":"white"} if self.inverted.get() else {"bg":"white","fg":"black"}
 
+    # Open a modal to view/edit free-form notes for this tab/clock.
     def open_notes(self):
         res = open_notes_modal(self, self.notes, self.title_var.get() or "Clock")
         if res is not None:
@@ -341,7 +369,9 @@ class ClockBase(ttk.Frame):
 
     # to be implemented by subclasses
     def draw(self): ...
+    # Serialize this widget/tab into a JSON-serializable dict.
     def to_dict(self): ...
+    # Load state from a previously serialized dict.
     def from_dict(self, data: dict): ...
 
 # ---------------------------
@@ -349,12 +379,12 @@ class ClockBase(ttk.Frame):
 #     The DangerClockFrame(ClockBase): class this is where your circular drawing lives.
 # ---------------------------
 class DangerClockFrame(ClockBase):
+    """ Circular "progress clock" with N pie-slice segments. Supports click-to-fill/unfill, labels, dark mode, color, and serialization. """
     TYPE = "danger"
 
     def __init__(self, master, initial_title="Danger Clock", segments=4, filled=0,
                  inverted=False, fill_color=None, notes="",
                  shared_segments_var=None, shared_inverted_var=None,
-                 # NEW:
                  enable_label_ui=True,
                  click_mode="normal",  # "normal" (pick segment), "serial_next" (always next), "disabled"
                  linked_parent=None,  # when embedded in LinkedClocksFrame
@@ -486,6 +516,7 @@ class DangerClockFrame(ClockBase):
         n = sum(self.filled)
         return (n - 1) if n > 0 else None
 
+    # Helper method: Destroy.
     def destroy(self):
         # detach shared segments trace if any, then let base remove its trace, then destroy
         try:
@@ -496,6 +527,7 @@ class DangerClockFrame(ClockBase):
             pass
         super().destroy()
 
+    # Helper method: On left click.
     def _on_left_click(self, event):
         """Fill the clicked segment (turn it on)."""
         idx = self._pos_to_segment(event.x, event.y)
@@ -503,6 +535,7 @@ class DangerClockFrame(ClockBase):
             self.filled[idx] = True
             self._redraw_circle()
 
+    # Defer single-click handling to distinguish from double-clicks.
     def _on_single_click_candidate(self, event):
         """Schedule a single-click action unless a double-click cancels it."""
         # Cancel any previous pending single-click
@@ -517,6 +550,7 @@ class DangerClockFrame(ClockBase):
         x, y = event.x, event.y
         self._single_click_job = self.after(220, lambda: self._apply_single_click(x, y))
 
+    # Apply the pending single-click fill once the delay elapses.
     def _apply_single_click(self, x, y):
         """Actually perform the single-click fill (called after short delay)."""
         self._single_click_job = None
@@ -526,6 +560,7 @@ class DangerClockFrame(ClockBase):
             self._redraw_circle()
 
 
+    # Unfill the right-clicked segment.
     def _on_right_click(self, event):
         """Un-fill the clicked segment (turn it off)."""
         idx = self._pos_to_segment(event.x, event.y)
@@ -533,6 +568,7 @@ class DangerClockFrame(ClockBase):
             self.filled[idx] = False
             self._redraw_circle()
 
+    # Map a canvas (x,y) click to the corresponding segment index or None.
     def _pos_to_segment(self, x, y):
         """
         Given a canvas (x,y) click, return the segment index 0..N-1,
@@ -579,6 +615,7 @@ class DangerClockFrame(ClockBase):
         if idx >= seg_count: idx = seg_count - 1
         return idx
 
+    # Open a color chooser and apply a new fill color.
     def choose_fill_color(self):
         (rgb, hexv) = colorchooser.askcolor(
             color=self.fill_color,
@@ -592,6 +629,7 @@ class DangerClockFrame(ClockBase):
             except Exception: pass
             self.draw()
 
+    # Resize internal lists to match segment count and redraw.
     def _clamp_and_draw(self):
         # Ensure the lists match the new segments value (from the combobox).
         target = int(self.segments.get())
@@ -599,6 +637,7 @@ class DangerClockFrame(ClockBase):
         self._resize_labels_to(target)
         self.draw()
 
+    # Fill one more segment (advance progress).
     def increase(self):
         # Increase count of filled segments by 1
         current = sum(self.filled)
@@ -606,6 +645,7 @@ class DangerClockFrame(ClockBase):
             self._set_fill_count(current + 1)
             self.draw()
 
+    # Unfill one segment (reverse progress).
     def decrease(self):
         # Decrease count of filled segments by 1
         current = sum(self.filled)
@@ -613,11 +653,13 @@ class DangerClockFrame(ClockBase):
             self._set_fill_count(current - 1)
             self.draw()
 
+    # Clear progress (unfill all segments).
     def reset(self):
         # Clear all segments
         self._set_fill_count(0)
         self.draw()
 
+    # Prompt for reset and apply related options specific to this clock.
     def reset_with_prompt(self):
         """
         Reset this single clock.
@@ -663,6 +705,7 @@ class DangerClockFrame(ClockBase):
             self.show_labels.set(self.show_labels.get())  # keep toggle state
         self.reset()
 
+    # Render/redraw the widget canvas based on current state.
     def draw(self):
         # Bail out cleanly if widget/canvas is gone (during teardown)
         if not self.winfo_exists():
@@ -727,7 +770,6 @@ class DangerClockFrame(ClockBase):
         self.radius = r
 
         # clear any previously tagged arcs (if you ever redraw without clearing all)
-        # (Not strictly needed since we did c.delete("all") above, but harmless.)
         c.delete("clock_arc")
 
         for i in range(seg_count):
@@ -807,6 +849,7 @@ class DangerClockFrame(ClockBase):
             except Exception:
                 pass
 
+    # React to dark/light mode changes, preserving readable fill colors; redraw.
     def _on_theme_changed(self):
         """
         When toggling Dark Mode:
@@ -836,6 +879,7 @@ class DangerClockFrame(ClockBase):
 
         self.draw()
 
+    # Open a modal with settings toggles and apply changes.
     def open_settings(self):
         items = [("Dark Mode", self.inverted)]
         dlg = SimpleSettingsDialog(self.winfo_toplevel(), "Danger Clock Settings", items)
@@ -858,6 +902,7 @@ class DangerClockFrame(ClockBase):
             "notes": self.notes,
         }
 
+    # Load state from a previously serialized dict.
     def from_dict(self, data: dict):
         # basic fields
         self.title_var.set(data.get("title", "Danger Clock"))
@@ -901,6 +946,7 @@ class DangerClockFrame(ClockBase):
         self.draw()
 
 
+    # Resize the filled-segments list to a new segment count.
     def _resize_filled_to(self, new_count: int):
         """Keep self.filled list the same length as self.segments."""
         new_count = int(new_count)
@@ -910,14 +956,17 @@ class DangerClockFrame(ClockBase):
         elif new_count < cur:
             self.filled = self.filled[:new_count]
 
+    # Set the first N segments filled; others unfilled.
     def _set_fill_count(self, n: int):
         """Fill the first n segments True, rest False."""
         n = max(0, min(int(n), int(self.segments.get())))
         self.filled = [True]*n + [False]*(int(self.segments.get()) - n)
 
+    # Convenience wrapper to trigger a redraw.
     def _redraw_circle(self):
         self.draw()
 
+    # Resize the labels list to a new segment count.
     def _resize_labels_to(self, new_count: int):
         new_count = int(new_count)
         cur = len(self.labels)
@@ -926,6 +975,7 @@ class DangerClockFrame(ClockBase):
         elif new_count < cur:
             self.labels = self.labels[:new_count]
 
+    # Open an editor to set per-segment labels in bulk.
     def edit_labels(self):
         """Simple modal to edit all segment labels at once."""
         segs = int(self.segments.get())
@@ -933,8 +983,6 @@ class DangerClockFrame(ClockBase):
 
         top = tk.Toplevel(self)
         top.title("Edit Segment Labels")
-        # (No transient/grab_set; we size+center below and use wait_window at end)
-        # (We will size and center after laying out widgets)
 
         frm = ttk.Frame(top, padding=8)
         frm.pack(fill="both", expand=True)
@@ -952,15 +1000,18 @@ class DangerClockFrame(ClockBase):
         btns = ttk.Frame(frm)
         btns.pack(fill="x", pady=(8, 0))
 
+        # Helper method: Do save.
         def do_save():
             for i, e in enumerate(entries):
                 self.labels[i] = e.get().strip()
             top.destroy()
             self.draw()
 
+        # Helper method: Do cancel.
         def do_cancel():
             top.destroy()
 
+        # Helper method: Do clear all.
         def do_clear_all():
             # Clear widgets immediately, and also clear labels on the clock
             for i, e in enumerate(entries):
@@ -991,6 +1042,7 @@ class DangerClockFrame(ClockBase):
         top.after(50, lambda: (entries[0].focus_set(), entries[0].select_range(0, 'end')))
         self.wait_window(top)
 
+    # Quickly set a label for the double-clicked segment.
     def _on_double_click(self, event):
         # Cancel the pending single-click fill so double-click does NOT fill
         if self._single_click_job is not None:
@@ -1006,7 +1058,6 @@ class DangerClockFrame(ClockBase):
         # quick prompt
         top = tk.Toplevel(self)
         top.title(f"Label for Segment {idx + 1}")
-        # (No transient/grab_set; wait_window below keeps it modal in practice)
         center_window_over_parent(self, top)
 
         frm = ttk.Frame(top, padding=8);
@@ -1018,11 +1069,13 @@ class DangerClockFrame(ClockBase):
         btns = ttk.Frame(frm);
         btns.pack(fill="x", pady=(8, 0))
 
+        # Helper method: Ok.
         def ok():
             self.labels[idx] = ent.get().strip()
             top.destroy();
             self.draw()
 
+        # Helper method: Cancel.
         def cancel():
             top.destroy()
 
@@ -1032,15 +1085,16 @@ class DangerClockFrame(ClockBase):
         self.wait_window(top)
 
         top.transient(self.winfo_toplevel()); top.grab_set()
-        # NEW:
         center_window_over_parent(self, top)
         frm = ttk.Frame(top, padding=8); frm.pack(fill="both", expand=True)
         ent = ttk.Entry(frm, width=36)
         ent.pack(fill="x"); ent.insert(0, self.labels[idx] or "")
         btns = ttk.Frame(frm); btns.pack(fill="x", pady=(8,0))
+        # Helper method: Ok.
         def ok():
             self.labels[idx] = ent.get().strip()
             top.destroy(); self.draw()
+        # Helper method: Cancel.
         def cancel():
             top.destroy()
         ttk.Button(btns, text="OK", command=ok).pack(side="left")
@@ -1056,6 +1110,7 @@ class RacingClocksFrame(ttk.Frame):
     TYPE = "racing"
     MAX_DIALS = 6
 
+    # Helper method: Init.
     def __init__(self, master, initial_title="Racing Clock", initial_dials=2, notes=""):
         super().__init__(master)
 
@@ -1118,6 +1173,7 @@ class RacingClocksFrame(ttk.Frame):
         if res is not None:
             self.notes = res
 
+    # Reset all child clocks/timers on this tab.
     def reset_all(self):
         # Ask whether to also clear labels on all dials
         ans = messagebox.askquestion(
@@ -1153,6 +1209,7 @@ class RacingClocksFrame(ttk.Frame):
         self._relayout()
         self._update_dial_buttons()
 
+    # Lay out child dials responsively based on available width/rows/columns.
     def _relayout(self):
         # place dials in rows of 3 (up to 6 total = 3x2)
         for w in self.dials:
@@ -1161,16 +1218,19 @@ class RacingClocksFrame(ttk.Frame):
             r, c = divmod(idx, 3)
             w.grid(row=r, column=c, sticky="nsew", padx=6, pady=6)
 
+    # Propagate segment-count changes to child dials and redraw.
     def _on_segments_changed(self):
         # Each dial is already bound to shared IntVar; just ask them to resize/redraw
         for d in self.dials:
             d._clamp_and_draw()
 
+    # Propagate theme changes to child dials and adjust overlay color.
     def _on_theme_changed_all(self):
         # Each dial’s _on_theme_changed handles fill-color contrast swap
         for d in self.dials:
             d._on_theme_changed()
 
+    # Open a modal with settings toggles and apply changes.
     def open_settings(self):
         items = [("Dark Mode", self.inverted_var)]
         dlg = SimpleSettingsDialog(self.winfo_toplevel(), "Racing Clocks Settings", items)
@@ -1188,6 +1248,7 @@ class RacingClocksFrame(ttk.Frame):
         except Exception:
             pass
 
+    # Remove the most recently added dial, respecting minimum count.
     def _remove_dial(self):
         if len(self.dials) <= 2:
             return
@@ -1211,6 +1272,7 @@ class RacingClocksFrame(ttk.Frame):
             "dials": [d.to_dict() for d in self.dials],
         }
 
+    # Load state from a previously serialized dict.
     def from_dict(self, data: dict):
         # Tab-level fields first (so shared vars are set before dials read)
         self.title_var.set(data.get("title", "Racing Clock"))
@@ -1222,6 +1284,7 @@ class RacingClocksFrame(ttk.Frame):
         dials_data = data.get("dials") or []
         self._rebuild_from_dials(dials_data)
 
+    # Helper method: Rebuild from dials.
     def _rebuild_from_dials(self, dials_data: list):
         # Clear old dials
         for d in self.dials:
@@ -1263,6 +1326,7 @@ class LinkedClocksFrame(ttk.Frame):
 
     TICK_MS = 250  # update resolution for timers
 
+    # Helper method: Init.
     def __init__(self, master, initial_title="Linked Clocks", initial_dials=2, notes=""):
         super().__init__(master)
 
@@ -1326,6 +1390,7 @@ class LinkedClocksFrame(ttk.Frame):
         ttk.Button(top, text="Remove Dial", command=self._remove_dial).grid(row=1, column=1, sticky="w", padx=(0, 12))
         ttk.Button(top, text="Reset All", command=self.reset_all).grid(row=1, column=2, sticky="w", padx=(0, 12))
 
+        # Helper method: Choose overlay color.
         def _choose_overlay_color():
             (rgb, hexv) = colorchooser.askcolor(
                 color=self.overlay_color.get(),
@@ -1388,6 +1453,7 @@ class LinkedClocksFrame(ttk.Frame):
         res = open_notes_modal(self, self.notes, self.title_var.get() or "Linked Clocks")
         if res is not None: self.notes = res
 
+    # Reset all child clocks/timers on this tab.
     def reset_all(self):
         self.stop()
 
@@ -1422,6 +1488,7 @@ class LinkedClocksFrame(ttk.Frame):
         self._validate_start_button()
         self._bind_serial_clicks()
 
+    # Validate timers and start/resume the master tick loop.
     def start(self):
         # Validate timers (guard against partial entries)
         if not self._validate_timers():
@@ -1436,6 +1503,7 @@ class LinkedClocksFrame(ttk.Frame):
         self._schedule_tick()
         self._sync_master_buttons()
 
+    # Stop the master tick loop.
     def stop(self):
         self._is_running = False
         self._cancel_tick()
@@ -1448,16 +1516,19 @@ class LinkedClocksFrame(ttk.Frame):
         self.start_btn.configure(state="normal" if not self._is_running else "disabled")
         self.stop_btn.configure(state="normal" if self._is_running else "disabled")
 
+    # Schedule the next timer tick callback.
     def _schedule_tick(self):
         self._cancel_tick()
         self._job = self.after(self.TICK_MS, self._on_tick)
 
+    # Cancel the scheduled timer tick callback if present.
     def _cancel_tick(self):
         if self._job:
             try: self.after_cancel(self._job)
             except Exception: pass
             self._job = None
 
+    # Timer engine: advance the active dial proportionally or idle in manual mode.
     def _on_tick(self):
         if not self._is_running:
             return
@@ -1525,6 +1596,7 @@ class LinkedClocksFrame(ttk.Frame):
                              parent=self.winfo_toplevel())
         return False
 
+    # Enable Start only when timers are all-set or all-clear; show/hide hint.
     def _validate_start_button(self):
         timers = [v.get() for v in self.timer_secs]
         any_set = any(t > 0 for t in timers)
@@ -1539,6 +1611,7 @@ class LinkedClocksFrame(ttk.Frame):
             else:
                 self._start_hint.pack(side="left", padx=(0, 8))
 
+    # Reset a specific dial's timer and elapsed time; refresh overlay.
     def _reset_timer_for(self, dial: DangerClockFrame):
         """Reset a single dial’s timer to 00:00:00 and zero its elapsed ms; update entry text."""
         try:
@@ -1547,6 +1620,7 @@ class LinkedClocksFrame(ttk.Frame):
             return
         self._reset_timer_by_index(i)
 
+    # Helper to reset timer/elapsed for a dial by index and refresh UI.
     def _reset_timer_by_index(self, i: int):
         """Helper: zero timer IntVar/elapsed and refresh its entry text/overlays."""
         if i < 0 or i >= len(self.dials):
@@ -1571,6 +1645,7 @@ class LinkedClocksFrame(ttk.Frame):
         self._redraw_overlays()
         self._validate_start_button()
 
+    # Reset all elapsed counters used for proportional overlays.
     def _reset_all_remaining(self):
         # Proportional timing uses elapsed; remaining is derived
         self.elapsed_ms = [0 for _ in self.dials]  # NEW
@@ -1598,6 +1673,7 @@ class LinkedClocksFrame(ttk.Frame):
     def _active_index(self) -> int | None:
         return next((i for i, d in enumerate(self.dials) if not d.is_complete()), None)
 
+    # Bind click handlers so only the active dial advances (or un-fills in manual mode).
     def _bind_serial_clicks(self):
         """Only the active dial gets clicks. Left=advance. Right=unfill (only when timers are NOT used)."""
         active = self._active_index()
@@ -1629,6 +1705,7 @@ class LinkedClocksFrame(ttk.Frame):
 
                 # right click: only in manual mode (no timers anywhere)
                 if not timers:
+                    # Helper method: Unfill.
                     def _unfill(_e, di=d):
                         # Use the public API so any future side‑effects stay consistent
                         di.decrease()
@@ -1666,6 +1743,7 @@ class LinkedClocksFrame(ttk.Frame):
         ttk.Label(ctrl, text="ⓘ fills segments evenly over total time", foreground="#666") \
             .pack(side="left", padx=(8, 0))
 
+        # Helper method: Parse and set.
         def parse_and_set(*_):
             txt = ent.get().strip()
             if not txt:
@@ -1705,6 +1783,7 @@ class LinkedClocksFrame(ttk.Frame):
         self._bind_serial_clicks()
         self._validate_start_button()
 
+    # Remove the most recently added dial, respecting minimum count.
     def _remove_dial(self):
         if len(self.dials) <= 2: return
         d = self.dials.pop()
@@ -1718,6 +1797,7 @@ class LinkedClocksFrame(ttk.Frame):
         self._redraw_overlays()
         self._bind_serial_clicks()
 
+    # Lay out child dials responsively based on available width/rows/columns.
     def _relayout(self):
         # Determine columns based on available width
         try:
@@ -1758,6 +1838,7 @@ class LinkedClocksFrame(ttk.Frame):
             r, c = divmod(i, cols)
             wgt.grid(row=r, column=c, sticky="nsew", padx=6, pady=6)
 
+    # Emit a brief audible notification (system beep) on completion.
     def _beep_once(self):
         """Play a single ding when a dial completes (original behavior)."""
         root = self.winfo_toplevel()
@@ -1774,10 +1855,12 @@ class LinkedClocksFrame(ttk.Frame):
         except Exception:
             pass
 
+    # Propagate segment-count changes to child dials and redraw.
     def _on_segments_changed(self):
         for d in self.dials: d._clamp_and_draw()
         self._bind_serial_clicks()
 
+    # Propagate theme changes to child dials and adjust overlay color.
     def _on_theme_changed_all(self):
         for d in self.dials: d._on_theme_changed()
         # Flip default overlay text color when theme changes (only if user hasn't picked a custom one)
@@ -1790,6 +1873,7 @@ class LinkedClocksFrame(ttk.Frame):
 
         self._redraw_overlays()
 
+    # Open a modal with settings toggles and apply changes.
     def open_settings(self):
         items = [
             ("Show Countdown Overlay", self._show_overlay),
@@ -1825,6 +1909,7 @@ class LinkedClocksFrame(ttk.Frame):
             ],
         }
 
+    # Load state from a previously serialized dict.
     def from_dict(self, data: dict):
         self.title_var.set(data.get("title", "Linked Clocks"))
         self.segments_var.set(int(data.get("segments", 4)))
@@ -1863,6 +1948,7 @@ class LinkedClocksFrame(ttk.Frame):
         self._validate_start_button()
         self._bind_serial_clicks()
 
+    # Helper method: Destroy.
     def destroy(self):
         self._cancel_tick()
         super().destroy()
@@ -1878,6 +1964,7 @@ class TugOfWarFrame(ttk.Frame):
 
     STEP_CHOICES = (4, 6, 8, 12)  # clicks to fully win either side (like Segments)
 
+    # Helper method: Init.
     def __init__(self, master, initial_title="Tug-of-War", notes="", initial_steps=6, inverted=False):
         super().__init__(master)
 
@@ -1950,6 +2037,7 @@ class TugOfWarFrame(ttk.Frame):
         if res is not None:
             self.notes = res
 
+    # Open a modal with settings toggles and apply changes.
     def open_settings(self):
         items = [("Dark Mode", self.inverted)]
         dlg = SimpleSettingsDialog(self.winfo_toplevel(), "Tug-of-War Settings", items)
@@ -1957,6 +2045,7 @@ class TugOfWarFrame(ttk.Frame):
         if dlg.result:
             self.draw()
 
+    # Helper method: Choose color.
     def _choose_color(self, side="left"):
         label = "Outcome A" if side == "left" else "Outcome B"
         (rgb, hexv) = colorchooser.askcolor(
@@ -1972,12 +2061,14 @@ class TugOfWarFrame(ttk.Frame):
                 self.right_color = hexv
             self.draw()
 
+    # Clamp tug-of-war shift to the new steps length and redraw.
     def _on_steps_changed(self):
         # Clamp shift to new range
         s = int(self.steps.get())
         self.shift.set(max(-s, min(self.shift.get(), s)))
         self.draw()
 
+    # Shift tug-of-war one step to the left and announce left win if reached.
     def pull_left(self):
         s = int(self.steps.get())
         if self.shift.get() > -s:
@@ -1986,6 +2077,7 @@ class TugOfWarFrame(ttk.Frame):
             if self.shift.get() == -s:
                 messagebox.showinfo("Tug-of-War", f"{self.left_outcome.get().strip() or 'Left'} wins!", parent=self.winfo_toplevel())
 
+    # Shift tug-of-war one step to the right and announce right win if reached.
     def pull_right(self):
         s = int(self.steps.get())
         if self.shift.get() <  s:
@@ -1994,6 +2086,7 @@ class TugOfWarFrame(ttk.Frame):
             if self.shift.get() == s:
                 messagebox.showinfo("Tug-of-War", f"{self.right_outcome.get().strip() or 'Right'} wins!", parent=self.winfo_toplevel())
 
+    # Clear progress (unfill all segments).
     def reset(self):
         # Reset bar position
         self.shift.set(0)
@@ -2006,6 +2099,7 @@ class TugOfWarFrame(ttk.Frame):
     def _colors(self):
         return {"bg": "black", "fg": "white"} if self.inverted.get() else {"bg": "white", "fg": "black"}
 
+    # Render/redraw the widget canvas based on current state.
     def draw(self):
         if not self.winfo_exists() or not self.canvas.winfo_exists():
             return
@@ -2093,6 +2187,7 @@ class TugOfWarFrame(ttk.Frame):
             "right_color": self.right_color,
         }
 
+    # Load state from a previously serialized dict.
     def from_dict(self, data: dict):
         self.title_var.set(data.get("title", "Tug-of-War"))
         self.notes = data.get("notes", "")
@@ -2112,6 +2207,8 @@ class TugOfWarFrame(ttk.Frame):
 #     This is the main window class.  It manages the overall application.
 # ---------------------------
 class MultiClockApp(tk.Tk):
+    """ Main Tk application window. Manages menus, tabs, autosave, and persistence for all clock types. """
+    # Helper method: Init.
     def __init__(self):
         super().__init__()
         self.title("Progress Clocks")
@@ -2202,6 +2299,7 @@ class MultiClockApp(tk.Tk):
                 items.append(frame.to_dict())
         return items
 
+    # Write the current session JSON to the given path.
     def _save_to_path(self, path: Path):
         """Save current session to JSON at `path`."""
         items = self._collect_tabs()
@@ -2211,10 +2309,12 @@ class MultiClockApp(tk.Tk):
         with open(path, "w", encoding="utf-8") as f:
             json.dump({"items": items}, f, ensure_ascii=False, indent=2)
 
+    # Begin the autosave loop.
     def _start_autosave(self):
         """Kick off autosave loop."""
         self._schedule_next_autosave()
 
+    # Set up the next autosave tick.
     def _schedule_next_autosave(self):
         """(Re)schedule next autosave tick."""
         if self._autosave_job:
@@ -2225,6 +2325,7 @@ class MultiClockApp(tk.Tk):
             self._autosave_job = None
         self._autosave_job = self.after(AUTOSAVE_MS, self._autosave_tick)
 
+    # Perform one autosave and reschedule the next.
     def _autosave_tick(self):
         """Do one autosave, then reschedule."""
         try:
@@ -2240,6 +2341,7 @@ class MultiClockApp(tk.Tk):
         finally:
             self._schedule_next_autosave()
 
+    # Persist window geometry and settings, stop autosave, and exit.
     def _on_close(self):
         """Final best-effort save, store window position, stop autosave, then close app."""
         try:
@@ -2300,6 +2402,7 @@ class MultiClockApp(tk.Tk):
 
         self.config(menu=menubar)
 
+    # Persist the 'open last session on launch' setting.
     def _on_toggle_open_last(self):
         self.settings["open_last_on_launch"] = bool(self.open_last_var.get())
         save_settings(self.settings)
@@ -2319,6 +2422,7 @@ class MultiClockApp(tk.Tk):
                                  inverted=inverted, fill_color=fill_color, notes=notes)
         self.nb.add(frame, text=self._short_title(title))
 
+        # Helper method: Sync.
         def sync(*_):
             idx = self.nb.index(frame)
             self.nb.tab(idx, text=self._short_title(frame.title_var.get()))
@@ -2326,6 +2430,7 @@ class MultiClockApp(tk.Tk):
         self.nb.select(frame)
         return frame
 
+    # Remove the currently selected tab (if any remain afterward).
     def remove_current(self):
         if self.nb.index("end") == 0:
             return
@@ -2333,6 +2438,7 @@ class MultiClockApp(tk.Tk):
         if current:
             self.nb.forget(current)
 
+    # Create a new Racing Clocks tab with shared settings.
     def add_racing_clocks(self, title=None, notes="", initial_dials=2):
         # Auto-number default titles "Racing Clock n"
         existing = []
@@ -2348,6 +2454,7 @@ class MultiClockApp(tk.Tk):
         frame = RacingClocksFrame(self.nb, initial_title=title, notes=notes, initial_dials=initial_dials)
         self.nb.add(frame, text=self._short_title(title))
 
+        # Helper method: Sync.
         def sync(*_):
             try:
                 idx = self.nb.index(frame)
@@ -2380,13 +2487,13 @@ class MultiClockApp(tk.Tk):
         try:
             self._save_to_path(Path(path))
             self.current_session_path = Path(path)  # remember for autosave
-            # NEW:
             self.settings["last_session_path"] = str(self.current_session_path)
             save_settings(self.settings)
             messagebox.showinfo("Saved", f"Saved to:\n{path}", parent=self)
         except Exception as e:
             messagebox.showerror("Save failed", f"{e}", parent=self)
 
+    # Prompt for a file and load a saved session.
     def load_session(self):
         """Manual load; rebuilds tabs; remembers path for autosave."""
         path = filedialog.askopenfilename(title="Load session JSON",
@@ -2403,6 +2510,7 @@ class MultiClockApp(tk.Tk):
         except Exception as e:
             messagebox.showerror("Load failed", f"{e}")
 
+    # Rebuild tabs from a session JSON at a specific path.
     def _load_from_path(self, path: Path):
         """Load a session JSON from a specific path (no file chooser)."""
         with open(path, "r", encoding="utf-8") as f:
@@ -2449,6 +2557,7 @@ class MultiClockApp(tk.Tk):
         title = (title or "Clock").strip()
         return (title[:18] + "…") if len(title) > 18 else title
 
+    # Create a new Linked Clocks tab with serial progression.
     def add_linked_clocks(self, title=None, notes="", initial_dials=2):
         existing = []
         for tab_id in self.nb.tabs():
@@ -2462,6 +2571,7 @@ class MultiClockApp(tk.Tk):
         frame = LinkedClocksFrame(self.nb, initial_title=title, notes=notes, initial_dials=initial_dials)
         self.nb.add(frame, text=self._short_title(title))
 
+        # Helper method: Sync.
         def sync(*_):
             try:
                 idx = self.nb.index(frame)
@@ -2474,6 +2584,7 @@ class MultiClockApp(tk.Tk):
         self.nb.select(frame)
         return frame
 
+    # Create a new Tug-of-War tab.
     def add_tug_of_war(self, title=None, notes="", initial_steps=6):
         # Auto-number default titles "Tug-of-War n"
         existing = []
@@ -2498,6 +2609,7 @@ class MultiClockApp(tk.Tk):
         frame = TugOfWarFrame(self.nb, initial_title=title, notes=notes, initial_steps=initial_steps)
         self.nb.add(frame, text=self._short_title(title))
 
+        # Helper method: Sync.
         def sync(*_):
             try:
                 idx = self.nb.index(frame)
