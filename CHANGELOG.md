@@ -9,7 +9,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Placeholder for upcoming changes.
 
 ---
+## [3.0.0] - 2025-08-23
+### Added
+- New **Tug-of-War** clock (progress bar/rope) with fixed central scrimmage line.
+- Outcome A/B titles above the bar; editable tab title driving live canvas title.
+- Outcome A/B fill color pickers (defaults: Outcome A = Green `#2ECC71`, Outcome B = Red `#E74C3C`).
 
+### Changed
+- Tug-of-War **Reset** now restores the rope to center **and** resets Outcome A/B colors to defaults.
+- Title in the Tug-of-War canvas updates immediately as the Tab Title text changes.
+
+### Fixed
+- Removed the “Scrimmage Line” label text under the rope (kept the vertical line).
+
+### Notes
+- Save/Load extended with a new tab type `"tug"`; existing sessions remain compatible.
+
+
+---
 ## [2.2.0] - 2025-08-23
 
 ### Added
