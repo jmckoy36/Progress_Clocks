@@ -3,7 +3,7 @@
 Progress Clocks Application
 """
 
-__version__ = "2.2.0"
+__version__ = "3.0.0"
 
 
 import json
@@ -1907,6 +1907,9 @@ class TugOfWarFrame(ttk.Frame):
         ttk.Label(top, text="Tab Title:").pack(side="left")
         ent = ttk.Entry(top, textvariable=self.title_var, width=28, justify="center")
         ent.pack(side="left", padx=(6, 12))
+        # Live‑update the bar title as the Tab Title changes
+        self.title_var.trace_add("write", lambda *_: self.draw())
+        ent.bind("<KeyRelease>", lambda e: self.draw())
 
         ttk.Label(top, text="Length (steps):").pack(side="left", padx=(0, 6))
         step_box = ttk.Combobox(top, state="readonly", values=self.STEP_CHOICES, width=6, textvariable=self.steps)
@@ -2074,9 +2077,6 @@ class TugOfWarFrame(ttk.Frame):
 
         # Scrimmage line overlay (fixed at true center)
         c.create_line(cx, top_y+6, cx, bottom_y-6, fill=colors["fg"], width=2)
-
-        # Label the center (optional, subtle)
-        c.create_text(cx, mid_y + bar_h/2 + 10, text="Scrimmage Line", fill=colors["fg"], font=("Arial", 9))
 
     # ---------- Persistence ----------
     def to_dict(self) -> dict:
