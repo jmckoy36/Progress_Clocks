@@ -1953,6 +1953,514 @@ class LinkedClocksFrame(ttk.Frame):
         self._cancel_tick()
         super().destroy()
 
+class MissionClocksFrame(ttk.Frame):
+    """
+    Mission Clocks: 1..6 independent circular dials (DangerClockFrame) each with:
+      - per-clock title, notes, +/- fill, reset, Settings, Start/Stop, HH:MM:SS timer
+      - per-clock fill color, show/hide labels
+      - Count Down (default) or Count Up from 00:00:00
+      - Display Digital Overlay OR Digital Only (replaces dial)
+    Tab-level controls:
+      - Tab title + Notes
+      - Segments (shared default for new dials; existing dials keep own value)
+      - Overlay color (for digital overlays)
+      - Add/Remove dial (min=1, max=6), Reset All, Start All / Stop All
+    Manual clicking: if a clock has NO timer set, clicks behave like a Danger clock.
+    If timer is running, segments fill evenly over the total time.
+    """
+    TYPE = "mission"
+    MAX_DIALS = 6
+    MIN_DIALS = 1
+    TICK_MS = 250
+
+    def __init__(self, master, initial_title="Mission Clocks", initial_dials=1, notes=""):
+        super().__init__(master)
+
+        # ---- Shared/tab state ----
+        self.title_var = tk.StringVar(value=initial_title)
+        self.segments_var = tk.IntVar(value=4)         # default for new dials (existing keep their own)
+        self.inverted_var = tk.BooleanVar(value=False)
+        self.notes = notes or ""
+
+        # Overlay (tab-level color used by dial overlays)
+        self._show_overlay = tk.BooleanVar(value=False)
+        self.overlay_color = tk.StringVar(value="#000000")
+
+        # Master engine (drive all running dials)
+        self._is_running = False
+        self._job = None
+
+        # Layout grid
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
+
+        # ---- Top bar ----
+        top = ttk.Frame(self); top.grid(row=0, column=0, sticky="we", padx=8, pady=(8, 0))
+        for c in range(10):
+            top.grid_columnconfigure(c, weight=0)
+        top.grid_columnconfigure(1, weight=1)  # title entry grows
+        top.grid_rowconfigure(1, minsize=44)
+
+        ttk.Label(top, text="Tab Title:").grid(row=0, column=0, padx=(0,6), sticky="w")
+        ent = ttk.Entry(top, textvariable=self.title_var, width=28, justify="center")
+        ent.grid(row=0, column=1, padx=(0,12), sticky="we")
+
+        ttk.Label(top, text="Segments:").grid(row=0, column=2, padx=(0,6), sticky="e")
+        seg_box = ttk.Combobox(top, state="readonly", values=SEGMENT_CHOICES, width=6, textvariable=self.segments_var)
+        seg_box.grid(row=0, column=3, sticky="w")
+
+        ttk.Button(top, text="Notes", command=self.open_notes).grid(row=0, column=4, padx=(12,12), sticky="w")
+
+        # Add/Remove
+        self.add_btn = ttk.Button(top, text="Add Clock", command=self._add_dial)
+        self.add_btn.grid(row=0, column=5, padx=(0,6))
+        self.remove_btn = ttk.Button(top, text="Remove Clock", command=self._remove_dial)
+        self.remove_btn.grid(row=0, column=6, padx=(0,12))
+
+        # Master actions
+        ttk.Button(top, text="Reset All", command=self.reset_all).grid(row=0, column=7, padx=(0,6))
+        self.master_start = ttk.Button(top, text="Start All", command=self.start_all)
+        self.master_stop  = ttk.Button(top, text="Stop All",  command=self.stop_all, state="disabled")
+        self.master_start.grid(row=0, column=8, padx=(0,6))
+        self.master_stop.grid(row=0, column=9, padx=(0,0))
+
+        # Overlay controls (tab-level)
+        overlay_row = ttk.Frame(top); overlay_row.grid(row=1, column=0, columnspan=10, sticky="w")
+        ttk.Checkbutton(overlay_row, text="Show Digital Overlay on all clocks", variable=self._show_overlay,
+                        command=self._redraw_overlays).pack(side="left", padx=(0,8))
+        ttk.Button(overlay_row, text="Overlay Color", command=self._choose_overlay_color).pack(side="left")
+
+        # ---- Dials area ----
+        self.dials_frame = ttk.Frame(self)
+        self.dials_frame.grid(row=1, column=0, sticky="nsew", padx=8, pady=8)
+        self.dials = []
+        self._relayout = lambda: self._layout_grid()
+
+        # Build initial dials (min=1, max=6)
+        target = max(self.MIN_DIALS, min(int(initial_dials or 1), self.MAX_DIALS))
+        for _ in range(target):
+            self._add_dial()
+
+        self._update_dial_buttons()
+
+    # ---------- Tab actions ----------
+    def _choose_overlay_color(self):
+        (_rgb, hexv) = colorchooser.askcolor(color=self.overlay_color.get(),
+                                             title="Choose Overlay Color", parent=self.winfo_toplevel())
+        if hexv:
+            self.overlay_color.set(hexv)
+            self._redraw_overlays()
+
+    def open_notes(self):
+        res = open_notes_modal(self, self.notes, self.title_var.get() or "Mission Clocks")
+        if res is not None:
+            self.notes = res
+
+    def start_all(self):
+        any_timer = any(getattr(d, "_has_timer_seconds", lambda: False)() for d in self.dials)
+        if not any_timer:
+            # no timers set anywhere -> nothing to start (manual mode)
+            return
+        for d in self.dials:
+            d._start_if_timer()
+        self._is_running = True
+        self._tick()
+        try:
+            self.master_start.configure(state="disabled")
+            self.master_stop.configure(state="normal")
+        except Exception:
+            pass
+
+    def stop_all(self):
+        self._is_running = False
+        for d in self.dials:
+            d._stop_timer()
+        if self._job:
+            try:
+                self.after_cancel(self._job)
+            except Exception:
+                pass
+            self._job = None
+        try:
+            self.master_start.configure(state="normal")
+            self.master_stop.configure(state="disabled")
+        except Exception:
+            pass
+
+    def reset_all(self):
+        # Stop master + all per-dial timers
+        self.stop_all()
+        # Clear fills and reset timer fields/entries to 00:00:00
+        for d in self.dials:
+            try:
+                d.reset()
+                d._remaining_ms = None
+                d._timer_seconds = 0
+                if getattr(d, "_timer_entry", None):
+                    d._timer_entry.delete(0, "end")
+                    d._timer_entry.insert(0, "00:00:00")
+            except Exception:
+                pass
+        self._redraw_overlays()
+
+    def _tick(self):
+        if not self._is_running:
+            return
+        for d in self.dials:
+            d._tick(self.TICK_MS)
+        self._redraw_overlays()
+        self._job = self.after(self.TICK_MS, self._tick)
+
+    def _redraw_overlays(self):
+        # ask each dial to redraw its overlay/digital-only state with current color and tab overlay toggle
+        for d in self.dials:
+            d._redraw_overlay(self._show_overlay.get(), self.overlay_color.get())
+
+    # ---------- Per-dial management ----------
+    def _update_dial_buttons(self):
+        add_state = "disabled" if len(self.dials) >= self.MAX_DIALS else "normal"
+        rm_state  = "disabled" if len(self.dials) <= self.MIN_DIALS else "normal"
+        try:
+            self.add_btn.configure(state=add_state)
+            self.remove_btn.configure(state=rm_state)
+        except Exception:
+            pass
+
+    def _layout_grid(self):
+        # 1-2 on one row; 3-4 two-by-two; 5-6 three-by-two
+        for w in self.dials_frame.grid_slaves():
+            w.grid_forget()
+        n = len(self.dials)
+        cols = 1 if n == 1 else (2 if n <= 4 else 3)
+        for i, d in enumerate(self.dials):
+            r, c = divmod(i, cols)
+            d.grid(row=r, column=c, padx=8, pady=8, sticky="n")
+        for c in range(3):
+            self.dials_frame.grid_columnconfigure(c, weight=1)
+
+    def _add_dial(self):
+        if len(self.dials) >= self.MAX_DIALS:
+            return
+        idx = len(self.dials)
+        # Each dial is a DangerClockFrame with its own settings/timers and manual click behavior
+        dial = DangerClockFrame(
+            self.dials_frame,
+            initial_title=f"Clock {idx + 1}",
+            segments=self.segments_var.get(),
+            inverted=self.inverted_var.get(),
+            enable_label_ui=True,
+            click_mode="normal",   # manual per-segment click when no timer
+            linked_parent=None,    # not linked; independent
+            show_settings_button=True
+        )
+
+        # ---- Per-dial control row (below dial) ----
+        ctrl = ttk.Frame(dial); ctrl.grid(row=3, column=0, columnspan=8, sticky="we", pady=(2,6))
+        # Fill color + Notes + +/- + Reset
+        ttk.Button(ctrl, text="Fill Color", command=lambda di=dial: di.choose_fill_color()).pack(side="left", padx=(0,6))
+        ttk.Button(ctrl, text="-1", width=3, command=lambda di=dial: (di.decrease(), self._redraw_overlays())).pack(side="left")
+        ttk.Button(ctrl, text="+1", width=3, command=lambda di=dial: (di.increase(), self._redraw_overlays())).pack(side="left", padx=(6,0))
+        ttk.Button(ctrl, text="Reset",
+                   command=lambda di=dial: (setattr(di, "_remaining_ms", None), setattr(di, "_timer_seconds", 0),
+                                            (di._timer_entry.delete(0, "end"),
+                                             di._timer_entry.insert(0, "00:00:00")) if getattr(di, "_timer_entry",
+                                                                                               None) else None,
+                                            di.reset(), self._redraw_overlays())).pack(side="left", padx=(12, 12))
+
+        # Timer controls
+        # Count Down by default; digital overlay and digital-only toggles live in Settings
+        ttk.Label(ctrl, text="Timer (HH:MM:SS):").pack(side="left", padx=(0,6))
+        timer_entry = ttk.Entry(ctrl, width=10, justify="center"); timer_entry.pack(side="left")
+        timer_entry.insert(0, "00:00:00")
+        # Store onto the dial for internal use
+        dial._timer_entry = timer_entry
+        dial._timer_seconds = 0           # configured total seconds
+        dial._remaining_ms = None         # countdown ms or elapsed ms
+        dial._count_down = tk.BooleanVar(value=True)  # per-clock toggle (default down)
+        dial._digital_overlay = tk.BooleanVar(value=False)
+        dial._digital_only = tk.BooleanVar(value=False)
+        dial._alarm_enabled = tk.BooleanVar(value=False)
+        dial._show_labels = tk.BooleanVar(value=True)
+
+        # Start / Stop buttons (you can later collapse to a single toggle if desired)
+        start_btn = ttk.Button(ctrl, text="Start", command=lambda di=dial: (di._parse_timer(), di._start_timer(), self._tick_guard()))
+        stop_btn  = ttk.Button(ctrl, text="Stop",  command=lambda di=dial: di._stop_timer(), state="disabled")
+        start_btn.pack(side="left", padx=(8,6)); stop_btn.pack(side="left")
+
+        # Wire helpers onto dial so the container can drive them
+        dial._start_if_timer = lambda di=dial: (di._parse_timer(), di._start_timer(no_ui=True))
+        dial._start_btn = start_btn; dial._stop_btn = stop_btn
+
+        # Behavior helpers
+        def _has_timer_seconds(di=dial):
+            try:
+                di._parse_timer()
+                return di._timer_seconds > 0
+            except Exception:
+                return False
+        dial._has_timer_seconds = _has_timer_seconds
+
+        def _tick(ms, di=dial):
+            # Advance dial based on timer mode and update overlay text
+            if di._remaining_ms is None:
+                return
+            if di._count_down.get():
+                di._remaining_ms = max(0, di._remaining_ms - ms)
+                done_ratio = 1.0 - (di._remaining_ms / (di._timer_seconds * 1000.0))
+                if di._remaining_ms == 0 and di._alarm_enabled.get():
+                    try: di.bell()
+                    except Exception: pass
+            else:
+                di._remaining_ms = di._remaining_ms + ms
+                done_ratio = min(1.0, (di._remaining_ms / (di._timer_seconds * 1000.0)) if di._timer_seconds else 0.0)
+
+            # Fill evenly based on ratio
+            segs = max(1, int(di.segments.get() if hasattr(di.segments, "get") else di.segments))
+            target_filled = int(round(done_ratio * segs))
+            di._set_fill_count(min(target_filled, segs))
+            di._update_overlay_text()
+        dial._tick = _tick
+
+        def _tick_guard():
+            # If *any* dial is running, container ensures tick loop is active
+            if not self._is_running:
+                self._is_running = True
+                self._tick()
+        self._tick_guard = _tick_guard
+
+        def _parse_timer(di=dial):
+            s = (di._timer_entry.get() or "").strip()
+            # Accept HH:MM:SS, MM:SS, or just SS
+            try:
+                parts = [int(p) for p in s.split(":")]
+                if len(parts) == 3:
+                    hh, mm, ss = parts
+                elif len(parts) == 2:
+                    hh, mm, ss = 0, parts[0], parts[1]
+                elif len(parts) == 1 and parts[0] >= 0:
+                    hh, mm, ss = 0, 0, parts[0]
+                else:
+                    hh, mm, ss = 0, 0, 0
+            except Exception:
+                hh, mm, ss = 0, 0, 0
+            di._timer_seconds = max(0, hh*3600 + mm*60 + ss)
+            return di._timer_seconds
+        dial._parse_timer = _parse_timer
+
+        def _start_timer(no_ui=False, di=dial):
+            total = di._parse_timer()
+            if total <= 0:
+                return
+            # reset progress then start
+            if di._count_down.get():
+                di.reset()
+                di._remaining_ms = total * 1000
+            else:
+                di.reset()
+                di._remaining_ms = 0
+            if not no_ui:
+                try:
+                    di._start_btn.configure(state="disabled")
+                    di._stop_btn.configure(state="normal")
+                except Exception:
+                    pass
+        dial._start_timer = _start_timer
+
+        def _start_timer_ui(di=dial):
+            di._start_timer()
+
+        def _start_if_timer(di=dial):
+            if di._has_timer_seconds():
+                di._start_timer(no_ui=True)
+        dial._start_if_timer = _start_if_timer
+
+        def _stop_timer(di=dial):
+            di._remaining_ms = None
+            try:
+                di._start_btn.configure(state="normal")
+                di._stop_btn.configure(state="disabled")
+            except Exception:
+                pass
+        dial._stop_timer = _stop_timer
+
+        def _update_overlay_text(di=dial):
+            """
+            Render HH:MM:SS for overlay/digital-only.
+            - When running:
+                * Count down: show remaining.
+                * Count up:   show elapsed.
+            - When stopped:
+                * If overlay/digital-only is enabled (or tab overlay is on), show the configured entry value.
+                * Otherwise show nothing.
+            """
+            ms = di._remaining_ms
+            show_any_overlay = bool(
+                getattr(di, "_overlay_enabled", False) or di._digital_overlay.get() or di._digital_only.get())
+
+            if ms is None:
+                # Not running: display configured value if overlays are enabled
+                if show_any_overlay:
+                    try:
+                        total = di._parse_timer()
+                    except Exception:
+                        total = 0
+                    h = total // 3600;
+                    m = (total % 3600) // 60;
+                    s = total % 60
+                    text = f"{h:02d}:{m:02d}:{s:02d}"
+                else:
+                    text = ""
+            else:
+                # Running
+                sec = max(0, int(ms / 1000))
+                h = sec // 3600;
+                m = (sec % 3600) // 60;
+                s = sec % 60
+                text = f"{h:02d}:{m:02d}:{s:02d}"
+
+            di._overlay_text = text
+            di.draw()
+
+        def _redraw_overlay(show_tab_overlay, color, di=dial):
+            di._overlay_enabled = bool(show_tab_overlay or di._digital_overlay.get() or di._digital_only.get())
+            di._overlay_color = color
+            di._overlay_text = getattr(di, "_overlay_text", "")
+            di.draw()
+        dial._redraw_overlay = _redraw_overlay
+
+        # Per-dial Settings dialog to host toggles
+        def _open_settings(di=dial):
+            items = [
+                ("Count Down (default)", di._count_down),
+                ("Display Digital Overlay", di._digital_overlay),
+                ("Display Digital Only", di._digital_only),
+                ("Enable Timer Alarm", di._alarm_enabled),
+                ("Show Labels", di._show_labels),
+            ]
+            dlg = SimpleSettingsDialog(di.winfo_toplevel(), f"{di.title_var.get() or 'Clock'} Settings", items)
+            di.wait_window(dlg)
+            if dlg.result:
+                di._update_overlay_text()
+                self._redraw_overlays()
+        dial.open_settings = _open_settings  # override the DangerClockFrame default
+
+        # Let dial draw overlay/digital-only
+        orig_draw = dial.draw
+        def _draw_with_overlay():
+            orig_draw()
+            # draw overlay if enabled
+            if getattr(dial, "_overlay_enabled", False):
+                c = getattr(dial, "canvas", None)
+                if c and c.winfo_exists():
+                    try:
+                        w = c.winfo_width(); h = c.winfo_height()
+                        text = getattr(dial, "_overlay_text", "")
+                        if dial._digital_only.get():
+                            # wipe dial area for a big digital timer
+                            c.delete("all")
+                            colors = dial._colors()
+                            c.configure(bg=colors["bg"])
+                            f = tkfont.Font(family="Arial", size=28, weight="bold")
+                            c.create_text(w/2, h/2, text=text, fill=dial._overlay_color, font=f, anchor="center")
+                        else:
+                            # overlay on top of the dial
+                            f = tkfont.Font(family="Arial", size=16, weight="bold")
+                            c.create_text(w/2, h-18, text=text, fill=dial._overlay_color, font=f, anchor="s")
+                    except Exception:
+                        pass
+            # respect per-dial "Show Labels"
+            try:
+                dial._labels_enabled = bool(dial._show_labels.get())
+            except Exception:
+                pass
+        dial.draw = _draw_with_overlay
+
+        # Finish wiring and add to layout
+        self.dials.append(dial)
+        self._relayout()
+        self._update_dial_buttons()
+
+    def _remove_dial(self):
+        if len(self.dials) <= self.MIN_DIALS:
+            return
+        d = self.dials.pop()
+        try:
+            d.destroy()
+        except Exception:
+            pass
+        self._relayout()
+        self._update_dial_buttons()
+
+    # ---------- Persistence ----------
+    def to_dict(self) -> dict:
+        return {
+            "type": self.TYPE,
+            "title": self.title_var.get(),
+            "segments": int(self.segments_var.get()),
+            "inverted": bool(self.inverted_var.get()),
+            "notes": self.notes,
+            "show_overlay": bool(self._show_overlay.get()),
+            "overlay_color": self.overlay_color.get(),
+            "dials": [
+                {
+                    **d.to_dict(),
+                    "timer_seconds": int(getattr(d, "_timer_seconds", 0)),
+                    "count_down": bool(getattr(d, "_count_down").get() if hasattr(d, "_count_down") else True),
+                    "digital_overlay": bool(getattr(d, "_digital_overlay").get() if hasattr(d, "_digital_overlay") else False),
+                    "digital_only": bool(getattr(d, "_digital_only").get() if hasattr(d, "_digital_only") else False),
+                    "alarm_enabled": bool(getattr(d, "_alarm_enabled").get() if hasattr(d, "_alarm_enabled") else False),
+                    "show_labels": bool(getattr(d, "_show_labels").get() if hasattr(d, "_show_labels") else True),
+                }
+                for d in self.dials
+            ],
+        }
+
+    def from_dict(self, data: dict):
+        self.title_var.set(data.get("title", "Mission Clocks"))
+        self.segments_var.set(int(data.get("segments", 4)))
+        self.inverted_var.set(bool(data.get("inverted", False)))
+        self.notes = data.get("notes", "")
+        self._show_overlay.set(bool(data.get("show_overlay", False)))
+        self.overlay_color.set(data.get("overlay_color", "#000000"))
+
+        # Rebuild dials
+        for d in self.dials:
+            try: d.destroy()
+            except Exception: pass
+        self.dials.clear()
+
+        dials_data = data.get("dials") or []
+        target = max(self.MIN_DIALS, min(len(dials_data) or 1, self.MAX_DIALS))
+        for _ in range(target):
+            self._add_dial()
+
+        # Feed back per-dial state
+        for d, dd in zip(self.dials, dials_data):
+            try:
+                d.from_dict(dd)  # let DangerClockFrame restore its own fields
+            except Exception:
+                pass
+            # per-dial extras
+            try:
+                d._timer_seconds = int(dd.get("timer_seconds", 0))
+                d._count_down.set(bool(dd.get("count_down", True)))
+                d._digital_overlay.set(bool(dd.get("digital_overlay", False)))
+                d._digital_only.set(bool(dd.get("digital_only", False)))
+                d._alarm_enabled.set(bool(dd.get("alarm_enabled", False)))
+                d._show_labels.set(bool(dd.get("show_labels", True)))
+                # rewrite the timer entry text for clarity
+                if hasattr(d, "_timer_entry"):
+                    s = int(d._timer_seconds)
+                    h, m, s2 = s//3600, (s%3600)//60, s%60
+                    d._timer_entry.delete(0, "end")
+                    d._timer_entry.insert(0, f"{h:02d}:{m:02d}:{s2:02d}" if d._timer_seconds else "")
+            except Exception:
+                pass
+
+        self._relayout()
+        self._update_dial_buttons()
+        self._redraw_overlays()
+
 class TugOfWarFrame(ttk.Frame):
     """
     Tug-of-War progress bar over a fixed scrimmage line.
@@ -2258,7 +2766,8 @@ class MultiClockApp(tk.Tk):
         ttk.Button(self.toolbar, text="Add Linked Clocks", command=self.add_linked_clocks).pack(side="left", padx=6,
                                                                                                 pady=6)
         ttk.Button(self.toolbar, text="Add Tug-of-War", command=self.add_tug_of_war).pack(side="left", padx=6, pady=6)
-
+        ttk.Button(self.toolbar, text="Add Mission Clock", command=self.add_mission_clocks).pack(side="left", padx=6,
+                                                                                                 pady=6)
         ttk.Button(self.toolbar, text="Remove Current", command=self.remove_current).pack(side="left", padx=6, pady=6)
 
         # ---- Notebook in the middle ----
@@ -2538,6 +3047,11 @@ class MultiClockApp(tk.Tk):
                 frame = self.add_linked_clocks(title=item.get("title", "Linked Clocks"))
                 if hasattr(frame, "from_dict"): frame.from_dict(item)
 
+            elif t == getattr(MissionClocksFrame, "TYPE", "mission"):
+                frame = self.add_mission_clocks(title=item.get("title", "Mission Clocks"))
+                if hasattr(frame, "from_dict"):
+                    frame.from_dict(item)
+
             elif t == getattr(TugOfWarFrame, "TYPE", "tug"):
                 frame = self.add_tug_of_war(title=item.get("title", "Tug-of-War"))
                 if hasattr(frame, "from_dict"):
@@ -2581,6 +3095,33 @@ class MultiClockApp(tk.Tk):
 
         frame.title_var.trace_add("write", lambda *_: sync())
 
+        self.nb.select(frame)
+        return frame
+
+    # Create a new Mission Clocks tab with independent timers and controls.
+    def add_mission_clocks(self, title=None, notes="", initial_dials=1):
+        # Auto-number default titles "Mission Clocks n"
+        existing = []
+        for tab_id in self.nb.tabs():
+            frame = self._frame_from_tab(tab_id)
+            if hasattr(frame, "title_var") and getattr(frame, "TYPE", "") == "mission":
+                existing.append(frame.title_var.get())
+        base = "Mission Clocks"
+        default_title = _next_numbered_title(existing, base)
+        title = (title or default_title).strip()
+
+        frame = MissionClocksFrame(self.nb, initial_title=title, notes=notes, initial_dials=initial_dials)
+        self.nb.add(frame, text=self._short_title(title))
+
+        # keep tab text in sync
+        def sync(*_):
+            try:
+                idx = self.nb.index(frame)
+                self.nb.tab(idx, text=self._short_title(frame.title_var.get()))
+            except Exception:
+                pass
+
+        frame.title_var.trace_add("write", lambda *_: sync())
         self.nb.select(frame)
         return frame
 
